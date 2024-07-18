@@ -1,0 +1,13 @@
+juliacall
+pyscf
+openfermionpyscf
+numpy
+openfermion
+pathos
+PennyLane
+scipy
+sympy
+argparse
+matplotlib
+qulacs
+block2
