@@ -2,8 +2,8 @@ import os
 import re
 import json
 from pyscf import gto, scf, mcscf, ao2mo
-from iqcc.utilspyscf import construct_fermionic_operator, construct_fermionic_operator_from_mcscf
-from iqcc.utils import f2q_map
+from qcc_240202.utilspyscf import construct_fermionic_operator, construct_fermionic_operator_from_mcscf
+from qcc_240202.utils import f2q_map
 from openfermion import (
     save_operator
 )
