@@ -10,4 +10,4 @@ sympy
 argparse
 matplotlib
 qulacs
-block2
+krypy
