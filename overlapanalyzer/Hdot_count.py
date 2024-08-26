@@ -8,7 +8,7 @@ from openfermion import (
     load_operator,
     get_sparse_operator,
 )
-from .read_ham import find_files, quick_load
+from overlapanalyzer.read_ham import find_files, quick_load
 
 
 class CountedLinearOperator(LinearOperator):
