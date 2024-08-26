@@ -11,11 +11,11 @@ from openfermion import (
 )
 import numpy as np
 import csv
-from .read_ham import find_files, quick_load, load_mol_info
-from .alg_LinearOp import linear_solver, lanczos_lowest_eigenvalue, davidson_lowest_eigenvalue, shifted_lanczos, get_diag_part_QubitOperator
-from .contour_integration import get_contour, sum_gauss_points, get_contour_with_eigsh_info
-from .iQCC import apply_iQCC_gens_to_state
-from .eigen import evals_no_degen, find_subspace_indices, vecs_in_subspace, overlap_with_ON_vecs
+from overlapanalyzer.read_ham import find_files, quick_load, load_mol_info
+from overlapanalyzer.alg_LinearOp import linear_solver, lanczos_lowest_eigenvalue, davidson_lowest_eigenvalue, shifted_lanczos, get_diag_part_QubitOperator
+from overlapanalyzer.contour_integration import get_contour, sum_gauss_points, get_contour_with_eigsh_info
+from overlapanalyzer.iQCC import apply_iQCC_gens_to_state
+from overlapanalyzer.eigen import evals_no_degen, find_subspace_indices, vecs_in_subspace, overlap_with_ON_vecs
 
 def getContourData(v_test, v_hf, eigsh_info, idx, num_points):
     w = eigsh_info['eigsh_energies']
