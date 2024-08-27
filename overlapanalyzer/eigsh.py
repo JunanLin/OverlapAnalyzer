@@ -5,8 +5,8 @@ from openfermion import (
     jw_configuration_state,
     get_sparse_operator
 )
-from .eigen import hf_occupation_list, get_exp_val_symmetries, sort_eigen, count_degeneracies, overlap_with_vectors, orthonormalize
-from .read_ham import *
+from overlapanalyzer.eigen import hf_occupation_list, get_exp_val_symmetries, sort_eigen, count_degeneracies, overlap_with_vectors, orthonormalize
+from overlapanalyzer.read_ham import *
 
 
 def calc_eigen(fileDir, num_eigs=10):
