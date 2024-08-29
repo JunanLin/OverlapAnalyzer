@@ -13,11 +13,11 @@ import os
 import numpy as np
 import scipy.sparse.linalg as spla
 from openfermion import jw_configuration_state, load_operator, QubitOperator
-from .alg_LinearOp import get_diag_part_QubitOperator, get_sparse_operator
-from .read_ham import quick_load, load_mol_info, find_files
-from .iQCC import apply_iQCC_gens_to_state
-from .cost_comparison import getContourData
-from .contour_integration import sum_gauss_points
+from overlapanalyzer.alg_LinearOp import get_diag_part_QubitOperator, get_sparse_operator
+from overlapanalyzer.read_ham import quick_load, load_mol_info, find_files
+from overlapanalyzer.iQCC import apply_iQCC_gens_to_state
+from overlapanalyzer.cost_comparison import getContourData
+from overlapanalyzer.contour_integration import sum_gauss_points
 
 class TestPrecond(unittest.TestCase):
     def calculateInnerProducts(self, H_q, phi, zi, initial_state, preconditioner, tol=1e-5):
