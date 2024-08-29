@@ -4,9 +4,9 @@ from numpy import real_if_close
 from openfermion import load_operator, get_sparse_operator, jw_hartree_fock_state, Davidson, DavidsonOptions
 from scipy.sparse import diags
 from scipy.sparse.linalg import eigsh
-from .Hdot_count import CountedLinearOperator
-from .read_ham import find_files, extract_numbers_from_filenames, quick_load
-from .eigen import calculate_lowest_eigen
+from overlapanalyzer.Hdot_count import CountedLinearOperator
+from overlapanalyzer.read_ham import find_files, extract_numbers_from_filenames, quick_load
+from overlapanalyzer.eigen import calculate_lowest_eigen
 
 def count_degeneracies(arr, tolerance=1e-10):
     # Initialize an empty list to store the counts
