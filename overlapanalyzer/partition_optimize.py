@@ -4,8 +4,8 @@ from scipy.sparse import identity, diags
 from scipy.sparse.linalg import norm
 from openfermion import load_operator
 from openfermion.linalg import get_sparse_operator
-from .partitioning import H_partition
-from .read_ham import find_files, quick_load
+from overlapanalyzer.partitioning import H_partition
+from overlapanalyzer.read_ham import find_files, quick_load
 
 
 def objective_function_real_imag(params, H, H0):
