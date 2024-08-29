@@ -16,21 +16,7 @@ from overlapanalyzer.alg_LinearOp import linear_solver, lanczos_lowest_eigenvalu
 from overlapanalyzer.contour_integration import get_contour, sum_gauss_points, get_contour_with_eigsh_info
 from overlapanalyzer.iQCC import apply_iQCC_gens_to_state
 from overlapanalyzer.eigen import evals_no_degen, find_subspace_indices, vecs_in_subspace, overlap_with_ON_vecs
-
-def getContourData(v_test, eigsh_info, idx, num_points, v_hf = None):
-    ovlp_hf=None
-    w = eigsh_info['eigsh_energies']
-    degen = eigsh_info['degen']
-    w_no_degen = evals_no_degen(w, degen)
-    exact_eval = w_no_degen[idx]
-    start, end = find_subspace_indices(degen, idx)
-    degen_vecs = vecs_in_subspace(eigsh_info['eigen_states'], degen, idx)
-    ovlp_test = overlap_with_ON_vecs(v_test, degen_vecs)
-    if v_hf is not None:
-        ovlp_hf = overlap_with_ON_vecs(v_hf, degen_vecs)
-    low, high, contour = get_contour_with_eigsh_info(w, degen, idx, num_points)
-    return start, end, ovlp_test, ovlp_hf, low, high, contour, exact_eval
-
+from overlapanalyzer.contour_integration import getContourData
 
 def run_cost_comparison(data_dir = os.path.join('hamiltonian_gen', 'n2'),state_to_eval = 'iQCC'):
     if len(sys.argv) != 5:

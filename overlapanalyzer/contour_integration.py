@@ -1,5 +1,5 @@
 import numpy as np
-from .eigen import evals_no_degen
+from overlapanalyzer.eigen import evals_no_degen, find_subspace_indices, vecs_in_subspace, overlap_with_ON_vecs
 
 def _z(c, r, angle):
     return c + r * np.exp(1j * angle)
@@ -33,6 +33,20 @@ def get_contour_with_eigsh_info(w, degen, idx, N, method='gauss'):
         r = min(diff_left, diff_right) / 2
     print(f"Selected range: ({c-r}, {c+r})")
     return c-r, c+r, get_contour(c, r, N, method)
+
+def getContourData(v_test, eigsh_info, idx, num_points, v_hf = None):
+    ovlp_hf=None
+    w = eigsh_info['eigsh_energies']
+    degen = eigsh_info['degen']
+    w_no_degen = evals_no_degen(w, degen)
+    exact_eval = w_no_degen[idx]
+    start, end = find_subspace_indices(degen, idx)
+    degen_vecs = vecs_in_subspace(eigsh_info['eigen_states'], degen, idx)
+    ovlp_test = overlap_with_ON_vecs(v_test, degen_vecs)
+    if v_hf is not None:
+        ovlp_hf = overlap_with_ON_vecs(v_hf, degen_vecs)
+    low, high, contour = get_contour_with_eigsh_info(w, degen, idx, num_points)
+    return start, end, ovlp_test, ovlp_hf, low, high, contour, exact_eval
 
 def gauss_integration(func, c, r, N_func_eval, pointwise=False):
     x, w = np.polynomial.legendre.leggauss(N_func_eval)
