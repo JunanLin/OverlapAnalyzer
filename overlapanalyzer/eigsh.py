@@ -1,4 +1,5 @@
 import pickle
+import json
 from scipy.sparse.linalg import eigsh
 from openfermion import (
     load_operator,
@@ -13,10 +14,10 @@ def calc_eigen(fileDir, num_eigs=10):
     for spin in  ('s0', 't1'):
         n_elec, n_spin_orb = load_mol_info(os.path.join(fileDir,'info.csv'))
         if spin == 's0':
-            occ_list = hf_occupation_list(n_elec, 0)
+            # occ_list = hf_occupation_list(n_elec, 0)
+            hf_state = jw_configuration_state([i for i in range(n_elec)], n_spin_orb)
         elif spin == 't1':
-            occ_list = hf_occupation_list(n_elec, 2)
-        hf_state = jw_configuration_state(occ_list, n_spin_orb)
+            hf_state = jw_configuration_state([i for i in range(n_elec-1)] + [n_elec], n_spin_orb)
 
 
         original_hams = find_files(os.path.join(fileDir,'ham_qubit'), spin + ".data") # list of filenames ending with ".data"
@@ -44,10 +45,9 @@ def calc_eigen(fileDir, num_eigs=10):
             ensure_directory_exists(os.path.join(fileDir, 'eigsh'))
             # save_operator(myiQCC.ham,file_name=filename, data_directory=dir+'/ham_dressed', allow_overwrite=True, plain_text=True)
             # quick_save({"Energy": myiQCC.energies_state_specific, "num_iterations": num_iterations, "num_generators": num_generators}, name=filename[:-5] + ".pkl", path=dir+'/ham_dressed')
-            saving_dict = prepare_dict_to_save(hf_occupation = occ_list,
-                                            eigsh_energies = w_sorted,
+            saving_dict = prepare_dict_to_save(eigsh_energies = w_sorted.tolist(),
                                             eigsh_energy_max = emax[0],
-                                            degen = degens,
+                                            degen = degens.tolist(),
                                             eigen_states = v_ON,
                                             overlaps = overlaps_with_lowest, 
                                             exp_sz = exp_sz,
@@ -56,4 +56,7 @@ def calc_eigen(fileDir, num_eigs=10):
                                             molecule=filename)
             with open(os.path.join(fileDir, 'eigsh', filename[:-5] + "_eigsh.pkl"), 'wb') as f:
                 pickle.dump(saving_dict, f)
-            # quick_save(saving_dict, name=filename[:-5] + f"_{num_generators}_gens_iQCC.pkl", path=ham_directory+'/iQCC_s0')
+            # Remove the eigen_states from saving_dict, and save another copy of saving_dict using json
+            saving_dict.pop('eigen_states')
+            with open(os.path.join(fileDir, 'eigsh', filename[:-5] + "_eigsh.json"), 'w') as f:
+                json.dump(saving_dict, f)
