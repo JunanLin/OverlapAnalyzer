@@ -34,7 +34,7 @@ def get_contour_with_eigsh_info(w, degen, idx, N, method='gauss'):
     print(f"Selected range: ({c-r}, {c+r})")
     return c-r, c+r, get_contour(c, r, N, method)
 
-def getContourData(v_test, eigsh_info, idx, num_points, v_hf = None):
+def getContourDataFromEigsh(v_test, eigsh_info, idx, num_points, v_hf = None):
     ovlp_hf=None
     w = eigsh_info['eigsh_energies']
     degen = eigsh_info['degen']
@@ -47,6 +47,11 @@ def getContourData(v_test, eigsh_info, idx, num_points, v_hf = None):
         ovlp_hf = overlap_with_ON_vecs(v_hf, degen_vecs)
     low, high, contour = get_contour_with_eigsh_info(w, degen, idx, num_points)
     return start, end, ovlp_test, ovlp_hf, low, high, contour, exact_eval
+
+def getContourDataFromEndPoints(left_bnd, right_bnd, num_points, method='gauss'):
+    c = (left_bnd + right_bnd) / 2
+    r = (right_bnd - left_bnd) / 2
+    return get_contour(c, r, num_points, method)
 
 def gauss_integration(func, c, r, N_func_eval, pointwise=False):
     x, w = np.polynomial.legendre.leggauss(N_func_eval)
@@ -77,7 +82,7 @@ def gauss_integration_test(func, c, r, N_func_eval):
 
 def sum_gauss_points(contour, computed_QF):
     integral = np.sum(contour["Weights"] * contour["Prefactor"] * computed_QF)
-    return np.real_if_close((integral + np.conjugate(integral)) / 4.)
+    return np.real_if_close((integral + np.conjugate(integral)) / 4.).tolist()
 
 
 def get_contour_ellipse(c, a, b, N):
