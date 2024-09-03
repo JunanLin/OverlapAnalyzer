@@ -50,15 +50,14 @@ def visualize_complex_matrix(matrix, save_path):
     plt.close()
 
 
-def visualize_chebyshev(Emin, Emax, E0, E1, Ec=None, chebyshev_degree=10):
+def visualize_chebyshev(Lower, Upper, E0, E1, Ec=None, chebyshev_degree=10):
     x_values = np.linspace(-1, 1, 400)
     plt.figure(figsize=(10, 8))
     if Ec is None:
         Ec = (E0+E1)/2
-    x0 = E_to_x(E0, Emin, Emax)
-    x1 = E_to_x(E1, Emin, Emax)
-    xc = E_to_x(Ec, Emin, Emax)
-    # overlap_est_Chebyshev(-1.8977806459898725*2,1.1465506236600063*2,-1.8813605029470586, hlist)
+    x0 = E_to_x(E0, Lower, Upper)
+    x1 = E_to_x(E1, Lower, Upper)
+    xc = E_to_x(Ec, Lower, Upper)
     cheb_coeffs = an_list(xc, chebyshev_degree)
     for n in range(1, chebyshev_degree):  # Starting from 1 because cheb_coeffs[:0] would be an empty slice
         y_values = chebval(x_values, cheb_coeffs[:n])
