@@ -16,7 +16,7 @@ from overlapanalyzer.alg_LinearOp import linear_solver, lanczos_lowest_eigenvalu
 from overlapanalyzer.contour_integration import get_contour, sum_gauss_points, get_contour_with_eigsh_info
 from overlapanalyzer.iQCC import apply_iQCC_gens_to_state
 from overlapanalyzer.eigen import evals_no_degen, find_subspace_indices, vecs_in_subspace, overlap_with_ON_vecs
-from overlapanalyzer.contour_integration import getContourData
+from overlapanalyzer.contour_integration import getContourDataFromEigsh
 
 def run_cost_comparison(data_dir = os.path.join('hamiltonian_gen', 'n2'),state_to_eval = 'iQCC'):
     if len(sys.argv) != 5:
@@ -71,7 +71,7 @@ def run_cost_comparison(data_dir = os.path.join('hamiltonian_gen', 'n2'),state_t
         # E0 = w[0]
         # psi_0 = v[:, 0]
         eigsh_results = quick_load(os.path.join(ham_directory,'eigsh'),filename[:-5] + "_eigsh.pkl")
-        start_idx, end_idx, overlap_exact, overlap_hf, lb, ub, contour, exact_eval = getContourData(phi, phi_ini, eigsh_results, idx, 8)
+        start_idx, end_idx, overlap_exact, overlap_hf, lb, ub, contour, exact_eval = getContourDataFromEigsh(phi, eigsh_results, idx, 8, v_hf=phi_ini)
         print("Exact phi-ground state overlap: ", overlap_exact)
         print("Exact HF-ground state overlap: ", overlap_hf)
 
@@ -108,7 +108,7 @@ def run_cost_comparison(data_dir = os.path.join('hamiltonian_gen', 'n2'),state_t
         print("Davidson completed.")
 
         # Calculate overlap using shifted Lanczos
-        # contour = get_contour(w[0],(w[1]-w[0])/2, 8)
+        contour = get_contour(w[0],(w[1]-w[0])/2, 8)
         output = shifted_lanczos(H_linear, phi, contour["Points"], max_iter = 50)
         overlaps = []
         energy_error = []

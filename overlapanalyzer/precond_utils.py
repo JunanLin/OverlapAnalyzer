@@ -16,7 +16,7 @@ from openfermion import jw_configuration_state, load_operator, QubitOperator
 from overlapanalyzer.alg_LinearOp import get_diag_part_QubitOperator, get_sparse_operator
 from overlapanalyzer.read_ham import quick_load, load_mol_info, find_files
 from overlapanalyzer.iQCC import apply_iQCC_gens_to_state
-from overlapanalyzer.cost_comparison import getContourData
+from overlapanalyzer.cost_comparison import getContourDataFromEigsh
 from overlapanalyzer.contour_integration import sum_gauss_points
 
 class TestPrecond(unittest.TestCase):
@@ -57,7 +57,7 @@ def genOverlapErrors(ham_directory, filename, dressed_ham=False):
     # Get iQCC state
     eigsh_results = quick_load(os.path.join(ham_directory,'eigsh'),filename + "_eigsh.pkl")
     phi = apply_iQCC_gens_to_state(iQCC_results, phi_ini)
-    start_idx, end_idx, overlap_exact, overlap_hf, lb, ub, contour, exact_eval = getContourData(phi, phi_ini, eigsh_results, 0, 8) # idx=0 for ground state
+    start_idx, end_idx, overlap_exact, overlap_hf, lb, ub, contour, exact_eval = getContourDataFromEigsh(phi, phi_ini, eigsh_results, 0, 8) # idx=0 for ground state
     if dressed_ham:
         phi = phi_ini # Use HF state if the Hamiltonian is dressed
     
@@ -136,7 +136,7 @@ def compareShifts(ham_directory, filename):
     # Get iQCC state
     eigsh_results = quick_load(os.path.join(ham_directory,'eigsh'),filename + "_eigsh.pkl")
     phi = apply_iQCC_gens_to_state(iQCC_results, phi_ini)
-    start_idx, end_idx, overlap_exact, overlap_hf, lb, ub, contour, exact_eval = getContourData(phi, phi_ini, eigsh_results, 0, 8) # idx=0 for ground state
+    start_idx, end_idx, overlap_exact, overlap_hf, lb, ub, contour, exact_eval = getContourDataFromEigsh(phi, phi_ini, eigsh_results, 0, 8) # idx=0 for ground state
     
     filenames = find_files(os.path.join(ham_directory, 'ham_frag'), '.data')
     # Instantiate the test case
