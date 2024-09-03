@@ -1,11 +1,16 @@
 # Import necessary packages
 import numpy as np
+import json
+import os
 from scipy.sparse.linalg import LinearOperator
 from scipy.linalg import eigh, eigh_tridiagonal
-from scipy.sparse.linalg import gmres
+from scipy.sparse.linalg import gmres, inv
 import time
 from openfermion import QubitOperator, get_sparse_operator
-from .eigen import sort_eigen
+from krypy.linsys import LinearSystem, Gmres
+
+from overlapanalyzer.eigen import sort_eigen
+from overlapanalyzer.contour_integration import sum_gauss_points, getContourDataFromEigsh, getContourDataFromEndPoints
 
 def select_values_and_vectors(values, vectors, low, high):
     # Create a mask for values in the range [low, high]
@@ -16,6 +21,19 @@ def select_values_and_vectors(values, vectors, low, high):
     selected_vectors = vectors[:, mask] # Select columns
 
     return selected_values, selected_vectors
+
+def select_lowest_value_and_vectors(values, c):
+    lowest_value = values[0]
+    mask = np.isclose(values, lowest_value)
+    selected_values = values[mask]
+    selected_vectors = c[:, mask]
+    return selected_values, selected_vectors
+
+def total_overlap_with_vectors(v, vectors):
+    return np.linalg.norm(v.conj().T @ vectors)**2
+
+def overlaps_with_vector_collection(v, vector_collection):
+    return [total_overlap_with_vectors(v, vectors) for vectors in vector_collection]
 
 banner = "="*70
 class gmres_counter():
@@ -66,7 +84,7 @@ def get_diag_part_QubitOperator(H: QubitOperator):
             diag_operator += QubitOperator(term, coeff)
     return diag_operator
 
-def get_id_coeff_QubitOperator(H):
+def get_id_coeff_QubitOperator(H: QubitOperator):
     """
     Returns the coefficient of the identity part of a QubitOperator
     """
@@ -77,7 +95,7 @@ def compute_inv_applied_to_state(E_Ritz, H_diag, phi, n_qubits, tol = 1e-2):
     Apply the inverse of H_diag onto phi by solving a linear system: (E_Ritz - H_diag) x = phi
     H_diag is a diagonal QubitOperator
     phi is a numpy array
-    Returns a numpy array
+    Returns (x, niter) where x is a numpy array and niter is the number of iterations
     """
     E_Ritz_QubitOperator = QubitOperator('', E_Ritz)
     # Find identity part ([]) of H_diag, extract the coefficient
@@ -167,186 +185,224 @@ def lanczos_lowest_eigenvalue(A, v, low, high, tol=1e-8, max_iter=100):
 
     return {"method": method_list, "eigenvalues": eigenvalues, "eigenvectors": eigenvectors, "iterations": iter_number, "matvec_list": matvec_list, "vecvec_list": vecvec_list, "runtime_list": runtime_list}
 
-def davidson_lowest_eigenvalue(A, v, diag, n_qubits, low, high, tol=1e-8, max_iter=20):
+class CustomLinearSolver:
     """
-    Need to modify so that v's are stored as column vectors in V instead of row vectors.
+    A class for manipulating and saving results of custom linear solvers.
     """
-    if not isinstance(A, LinearOperator):
-        raise ValueError("A must be a scipy.sparse.linalg.LinearOperator")
-    matvec_count = 0
-    vecvec_count = 0
-    if len(v.shape)>1:
-        v=v.reshape(-1)
-    # First iteration
-    v1 = v / np.linalg.norm(v)
-    vecvec_count += 1
-    V = np.array([v1.copy()])
-    w = A @ v1
-    matvec_count += 1
-    W = np.array([w.copy()])
-    # Create a variable to store the subspace Hamiltonian H, start from a 1-by-1 matrix then expand it iteratively
-    H = np.zeros((1, 1))
-    E_save = np.real(np.vdot(v, w))
-    H[0, 0] = E_save
-    vecvec_count += 1
-    
-    eigenvalues = []
-    eigenvectors = []
-    iter_number = []
-    matvec_list = []
-    vecvec_list = []
-    method_list = []
-    runtime_list = []
+    def __init__(self):
+        pass
+    def save_results_to_json(self, vec_to_comp_overlap_with, exact_overlap, savedir, filename):
+        if isinstance(self, CustomDavidson):
+            dict_save = {"method": "Davidson"}
+            attribute_list = ["tol", "inner_tol", "max_iter", "inner_matvec", "outer_matvec", "eigenvalues"]
+            for attr in attribute_list:
+                dict_save[attr] = getattr(self, attr)
+            dict_save["overlaps"] = overlaps_with_vector_collection(vec_to_comp_overlap_with, self.eigenvectors)
+            dict_save["exact_overlap"] = exact_overlap
+            dict_save['absolute_overlap_error'] = (np.array(dict_save["overlaps"]) - exact_overlap).tolist()
+            dict_save["relative_overlap_error"] = (np.abs(dict_save['absolute_overlap_error'])/exact_overlap).tolist()
+            with open(os.path.join(savedir, filename+'_Davidson.json'), 'w') as f:
+                json.dump(dict_save, f)
+        elif isinstance(self, CustomShiftedParallelLanczos):
+            dict_save = {"method": self.method}
+            attribute_list = ["tol", "max_iter", "overlaps", "matvec", "vecvec"]
+            for attr in attribute_list:
+                dict_save[attr] = getattr(self, attr)
+            dict_save["exact_overlap"] = exact_overlap
+            dict_save['absolute_overlap_error'] = (np.array(self.overlaps) - exact_overlap).tolist()
+            dict_save["relative_overlap_error"] = (np.abs(dict_save['absolute_overlap_error'])/exact_overlap).tolist()
+            with open(os.path.join(savedir, filename+f'_{self.method}.json'), 'w') as f:
+                json.dump(dict_save, f)
+        elif isinstance(self, GMRES):
+            dict_save = {"method": self.method}
+            attribute_list = ["tol", "max_iter", "overlaps", "matvec"]
+            for attr in attribute_list:
+                dict_save[attr] = getattr(self, attr)
+            dict_save["exact_overlap"] = exact_overlap
+            dict_save['absolute_overlap_error'] = {i: (self.overlaps[i] - exact_overlap).tolist() for i in self.overlaps} # i's label the preconditioners
+            dict_save["relative_overlap_error"] = {i: (np.abs(self.overlaps[i] - exact_overlap)/exact_overlap).tolist() for i in self.overlaps}
+            with open(os.path.join(savedir, filename+f'_{self.method}.json'), 'w') as f:
+                json.dump(dict_save, f)
+        
+class CustomDavidson(CustomLinearSolver):
+    def __init__(self, A, v, n_qubits, diag=None, use_range=False, low=None, high=None, tol=1e-8, inner_tol = 1e-3, max_iter=20):
+        if not isinstance(A, QubitOperator):
+            raise ValueError("A must be a OpenFermion QubitOperator")
+        self.A = get_sparse_operator(A)
+        self.v = v
+        self.diag = diag if diag is not None else get_diag_part_QubitOperator(A)
+        self.use_range = use_range
+        self.n_qubits = n_qubits
+        self.low = low
+        self.high = high
+        self.tol = tol
+        self.inner_tol = inner_tol
+        self.max_iter = max_iter
+        self.eigenvalues = []
+        self.eigenvectors = []
+        self.outer_matvec = []
+        self.inner_matvec = []
 
-    time_init = time.time()
-    for i in range(max_iter):
-        # Expand the subspace Hamiltonian H by appending new rows and columns
-        if i > 0:
-            H = np.pad(H, ((0, 1), (0, 1)), 'constant')
-            for j in range(i):
-                H[i, j] = np.real(np.vdot(V[j], W[i]))
-                H[j, i] = np.real(np.vdot(V[i], W[j]))
-                vecvec_count += 2 
-            H[i, i] = np.real(np.vdot(V[i], W[i]))
+    def run(self):
+        matvec_count = 0
+        vecvec_count = 0
+        
+        # Ensure v is treated as a column vector
+        v = self.v if self.v.ndim == 2 else self.v.reshape(-1, 1)
+        
+        v1 = v / np.linalg.norm(v)
+        vecvec_count += 1
+        
+        V = v1.copy()  # V will now be a matrix with v1 as its first column
+        w = self.A @ v1
+        matvec_count += 1
+        
+        W = w.copy()  # W will now be a matrix with w as its first column
+        
+        H = np.zeros((1, 1))
+        E_save = np.real(np.vdot(v1[:, 0], w[:, 0]))
+        H[0, 0] = E_save
+        vecvec_count += 1
+
+        time_init = time.time()
+        for i in range(self.max_iter):
+            if i > 0:
+                H = np.pad(H, ((0, 1), (0, 1)), 'constant')
+                for j in range(i):
+                    H[i, j] = np.real(np.vdot(V[:, j], W[:, i]))
+                    H[j, i] = np.real(np.vdot(V[:, i], W[:, j]))
+                    vecvec_count += 2
+                H[i, i] = np.real(np.vdot(V[:, i], W[:, i]))
+                vecvec_count += 1
+            
+            E_Ritz, c = eigh(H)
+            time_now = time.time()
+            E_Ritz, c = sort_eigen(E_Ritz, c)
+            if self.use_range and self.low is not None and self.high is not None:
+                eval_selected, evec_selected = select_values_and_vectors(E_Ritz, c, self.low, self.high)
+            else:
+                eval_selected, evec_selected = select_lowest_value_and_vectors(E_Ritz, c)
+
+            if len(eval_selected) == 0:
+                self.eigenvalues.append(E_Ritz[i].tolist())
+                self.eigenvectors.append(V @ c[:, i:i+1])
+            else:
+                self.eigenvalues.append(eval_selected.tolist())
+                self.eigenvectors.append(V @ evec_selected)
+            
+            self.outer_matvec.append(matvec_count)
+
+            if i > 0 and abs(E_Ritz[0] - E_save) < self.tol:
+                break
+
+            E_save = E_Ritz[0]
+
+            r = W @ c[:, 0:1] - (E_Ritz[0] * V) @ c[:, 0:1]
+            vecvec_count += (2 * i + 3)
+            # If the inverse of the diagonal part of the Hamiltonian is known, then we can apply it directly to the residual vector
+            # which cause matvec to increase by 1
+            # If not, we need to solve a linear system to apply the inverse of the diagonal part to the residual vector
+            # which will cause matvec to increase by n_iter (stored in self.inner_matvec)
+            r, n_iter = compute_inv_applied_to_state(E_Ritz[0], self.diag, r, self.n_qubits, tol=self.inner_tol)
+            r=r.reshape(-1,1)
+            self.inner_matvec.append(n_iter)
+            r = r - V @ (V.T @ r)
+            vecvec_count += (2 * i + 3)
+            r = r / np.linalg.norm(r)
             vecvec_count += 1
-        E_Ritz, c = eigh(H)
-        time_now = time.time()
-        # Ensure eigenvalues are sorted
-        E_Ritz, c = sort_eigen(E_Ritz, c)
-        eval_selected, evec_selected = select_values_and_vectors(E_Ritz, c, low, high)
-        # eigenvalues.append(E_Ritz[0])
-        # eigenvectors.append(V.T @ c[:, 0])
-        if len(eval_selected) == 0:
-            eigenvalues.append(E_Ritz[i])
-            eigenvectors.append(V.T @ c[:, i:i+1])
+            
+            V = np.hstack((V, r))
+            w = self.A @ r
+            matvec_count += 1
+            W = np.hstack((W, w))
+
+class CustomShiftedParallelLanczos(CustomLinearSolver):
+    def __init__(self, A, v, eigsh_results, n_qubits, tol=1e-8, max_iter=100, eval_index=0, n_contour_pts=8, contour_endpoints=None):
+        self.method = "ShiftedParallelLanczos"
+        self.A = get_sparse_operator(A) if isinstance(A, QubitOperator) else A
+        self.v = v
+        if contour_endpoints is None:
+            start_idx, end_idx, self.exact_overlap, overlap_hf, lb, ub, self.contour, self.exact_eval = getContourDataFromEigsh(v, eigsh_results, eval_index, n_contour_pts) # idx=0 for ground state
         else:
-            eigenvalues.append(eval_selected)
-            eigenvectors.append(V.T @ evec_selected)
-        iter_number.append(i)
-        matvec_list.append(matvec_count)
-        vecvec_list.append(vecvec_count)
-        method_list.append("Davidson")
-        
-        runtime_list.append(time_now - time_init)
+            self.contour = getContourDataFromEndPoints(contour_endpoints[0], contour_endpoints[1], n_contour_pts)
+            self.exact_overlap = eigsh_results["overlaps"][eval_index]   
+        self.n_qubits = n_qubits
+        self.tol = tol
+        self.max_iter = max_iter
+        self.eval_index = eval_index
+        self.n_contour_pts = n_contour_pts
+        self.overlaps = []
+    def run(self):
+        matvec_count = 0
+        vecvec_count = 0
 
-        if i > 0 and abs(E_Ritz[0] - E_save) < tol:
-            break
-
-        E_save = E_Ritz[0]
-
-        # W has shape (i+1, N); c[:,0] has shape (i+1). Need to transpose W before multiplying
-        r = W.T @ c[:, 0]- (E_Ritz[0] * V).T @ c[:, 0]
-        vecvec_count += (2*i+3)
-        # Apply the preconditioner
-        # precond = 1 / (E_Ritz[0] - diag)
-        # r = (precond * r)
-        r, n_iter = compute_inv_applied_to_state(E_Ritz[0], diag, r, n_qubits)
-        matvec_count += n_iter
-        # vecvec_count += 1 # vecvec cannot be counted in current implementation
-        # Orthogonalize r with respect to all existing column vectors in V
-        r = r - V.T @ (V @ r)
-        vecvec_count += (2*i+3)
-        # Normalize r
-        r = r / np.linalg.norm(r) # r has shape (N,) up to this step
+        v = self.v if self.v.ndim == 2 else self.v.reshape(-1, 1)
+        v1 = v / np.linalg.norm(v)
         vecvec_count += 1
-        V = np.concatenate((V, r[:, np.newaxis].T))# To get the dimension right, r needs to have shape (1, N)
-        
-        w = A @ r # w has shape (N,)
+        s1 = self.A @ v1
         matvec_count += 1
-        W = np.concatenate((W, w[:, np.newaxis].T)) 
-    return {"method": method_list, "eigenvalues": eigenvalues, "eigenvectors": eigenvectors, "iterations": iter_number, "matvec_list": matvec_list, "vecvec_list": vecvec_list, "runtime_list": runtime_list}
-
-
-def shifted_lanczos(A, v, zi, tol=1e-8, max_iter=100):
-    if not isinstance(A, LinearOperator):
-        raise ValueError("A must be a scipy.sparse.linalg.LinearOperator")
-    
-    matvec_count = 0
-    vecvec_count = 0
-    expectation_values = []
-    iter_number = []
-    matvec_list = []
-    vecvec_list = []
-    method_list = []
-    runtime_list = []
-
-    # Normalization of v and initial setups
-    v1 = v / np.linalg.norm(v)
-    vecvec_count += 1
-    s1 = A @ v1
-    matvec_count += 1
-    alpha_1 = np.vdot(s1, v1)
-    vecvec_count += 1
-
-    # Initialize variables for all shifts
-    c = {shift: np.vdot(v, v) for shift in zi}
-    vecvec_count += len(zi)
-    pi = {shift: 1 / (shift - alpha_1) for shift in zi}
-    L = {shift: c[shift] / (shift - alpha_1) for shift in zi}
-    expectation_values.append([L[shift] for shift in zi])
-    iter_number.append(1)
-    matvec_list.append(matvec_count)
-    vecvec_list.append(vecvec_count)
-    method_list.append("Parallel Lanczos")
-
-    L_old = L.copy()
-
-    vk = v1
-    sk = s1
-    alpha_k = alpha_1
-
-    time_init = time.time()
-    for k in range(2, max_iter + 2):
-        tk = sk - alpha_k * vk
-        vecvec_count += 1
-        beta_k = np.linalg.norm(tk)
+        alpha_1 = np.vdot(s1, v1)
         vecvec_count += 1
 
-        # if beta_k < tol:  # Convergence check based on deltak
-        #     break
+        c = {shift: np.vdot(v, v) for shift in self.contour["Points"]}
+        vecvec_count += len(self.contour["Points"])
+        pi = {shift: 1 / (shift - alpha_1) for shift in self.contour["Points"]}
+        L = {shift: c[shift] / (shift - alpha_1) for shift in self.contour["Points"]}
+        self.expectation_values = [[L[shift] for shift in self.contour["Points"]]]
+        self.iter_number = [1]
+        self.matvec = [matvec_count]
+        self.vecvec = [vecvec_count]
 
-        vk_next = tk / beta_k
-        sk_next = A.matvec(vk_next) - beta_k * vk
-        matvec_count += 1
-        vecvec_count += 1
-        alpha_k_next = np.real_if_close(np.vdot(sk_next, vk_next))
-        vecvec_count += 1
+        L_old = L.copy()
 
-        # Update L, fi, and c for all shifts and check for convergence
-        converged = False
-        for shift in zi:
-            tki = (beta_k ** 2 * pi[shift])
-            pi_next = 1 / (shift - alpha_k_next - tki)
-            ci_next = c[shift] * tki * pi[shift]
-            L_old[shift] = L[shift]
-            L[shift] += ci_next * pi_next
+        vk = v1
+        sk = s1
+        alpha_k = alpha_1
+
+        for k in range(2, self.max_iter + 2):
+            tk = sk - alpha_k * vk
+            vecvec_count += 1
+            beta_k = np.linalg.norm(tk)
             vecvec_count += 1
 
-            # Check if the change in L is below the tolerance for all shifts
-            # If any shift is above tol, then we'll go for another iteration
-            if abs(L[shift] - L_old[shift]) < tol:
-                converged = True
+            vk_next = tk / beta_k
+            sk_next = self.A @ vk_next - beta_k * vk
+            matvec_count += 1
+            vecvec_count += 1
+            alpha_k_next = np.real_if_close(np.vdot(sk_next, vk_next))
+            vecvec_count += 1
 
-            # Update values for next iteration
-            pi[shift] = pi_next
-            c[shift] = ci_next
-        
-        expectation_values.append([L[shift] for shift in zi])
-        iter_number.append(k)
-        matvec_list.append(matvec_count)
-        vecvec_list.append(vecvec_count)
-        method_list.append("Parallel Lanczos")
-        time_now = time.time()
-        runtime_list.append(time_now - time_init)
-        if converged:  # If converged for all shifts, break
-            break
+            converged = False
+            for shift in self.contour["Points"]:
+                tki = (beta_k ** 2 * pi[shift])
+                pi_next = 1 / (shift - alpha_k_next - tki)
+                ci_next = c[shift] * tki * pi[shift]
+                L_old[shift] = L[shift]
+                L[shift] += ci_next * pi_next
+                vecvec_count += 1
 
-        # Update vk and sk for the next iteration
-        vk = vk_next
-        sk = sk_next
-        alpha_k = alpha_k_next
+                if abs(L[shift] - L_old[shift]) < self.tol:
+                    converged = True
 
-    return {"method": method_list, "expectation_values": expectation_values, "iterations": iter_number, "matvec_list": matvec_list, "vecvec_list": vecvec_list, "runtime_list": runtime_list}
+                pi[shift] = pi_next
+                c[shift] = ci_next
+            
+            self.expectation_values.append([L[shift] for shift in self.contour["Points"]])
+            self.iter_number.append(k)
+            self.matvec.append(matvec_count)
+            self.vecvec.append(vecvec_count)
+            if converged:
+                break
+
+            # Update vk and sk for the next iteration
+            vk = vk_next
+            sk = sk_next
+            alpha_k = alpha_k_next
+
+        for computed_QF in self.expectation_values:
+            self.overlaps.append(sum_gauss_points(self.contour, computed_QF))
+        self.absolute_overlap_error = (np.array(self.overlaps) - self.exact_overlap).tolist()
+        self.relative_overlap_error = (np.abs(self.absolute_overlap_error)/self.exact_overlap).tolist()
 
 # Write a function to implement the conjugate gradient method to solve a linear system Ax=b, keeping track of the number of matrix-vector and vector-vector multiplications after each iteration as above.
 def conjugate_gradient(A, b, x0=None, tol=1e-8, max_iter=100):
@@ -398,30 +454,69 @@ def conjugate_gradient(A, b, x0=None, tol=1e-8, max_iter=100):
 
     return {"method": method_list, "iterations": k, "matvec_list": matvec_list, "vecvec_list": vecvec_list}
 
-def gmres_1_shift(H_sparse, v, z, x0=None, M=None, tol=1e-8, max_iter=100):
-    def matvec_shifted(x):
-        matvec_count += 1
-        return z*x - H_sparse @ x
-    def record_iteration_result(x):
-        expectation_values.append(np.vdot(v, x))
-        # iter_number.append(k)
-        matvec_list.append(matvec_count)
-        vecvec_list.append(vecvec_count)
-        method_list.append("GMRES")
-    matvec_count = 0
-    vecvec_count = 0
-    expectation_values = []
-    iter_number = []
-    matvec_list = []
-    vecvec_list = []
-    method_list = []
+def calculateInnerProducts(H_q, phi, zi, initial_state, preconditioner, tol=1e-5, maxiter=100):
+    print("Solving for z = ", zi)
+    linear_system = LinearSystem(get_sparse_operator(QubitOperator('', zi)-H_q), phi, Ml=preconditioner)
+    solver = Gmres(linear_system, x0=initial_state, explicit_residual=True, store_all_xk=True, tol=tol, maxiter=maxiter)
+    xks = solver.xk_all
+    outList = [np.inner(phi, xk.flatten()) for xk in xks]
+    print("First 5 integrands: ", outList[:5])
+    return outList
 
-    A_operator = LinearOperator(H_sparse.shape, matvec=matvec_shifted)
+class GMRES(CustomLinearSolver):
+    """
+    GMRES method, currently using GMRES module from krypy.
+    Future: Implement a custom GMRES method to keep track of the number of 
+    matrix-vector and vector-vector multiplications using preconditioners.
+    """
+    def __init__(self, H:QubitOperator, phi, eigsh_results, n_contour_pts, method="GMRES", tol=1e-5, max_iter=100, preconds_labels = ["None", "Diag"], eval_index=0, contour_endpoints=None):
+        self.method = "GMRES"
+        self.H = H
+        self.phi = phi
+        self.eigsh_results = eigsh_results
+        self.method = method
+        # self.preconds = preconds
+        self.preconds_labels = preconds_labels
+        self.eval_index = eval_index
+        self.n_contour_pts = n_contour_pts
+        self.integration_center = (contour_endpoints[1]-contour_endpoints[0])/2 if contour_endpoints is not None else eigsh_results["eigenvalues"][eval_index]
+        self.tol = tol
+        self.max_iter = max_iter
+        if contour_endpoints is None:
+            start_idx, end_idx, self.exact_overlap, overlap_hf, lb, ub, self.contour, self.exact_eval = getContourDataFromEigsh(phi, eigsh_results, eval_index, n_contour_pts) # idx=0 for ground state
+        else:
+            self.contour = getContourDataFromEndPoints(contour_endpoints[0], contour_endpoints[1], n_contour_pts)
+            self.exact_overlap = self.eigsh_results["overlaps"][eval_index]
+        self.temp_results = {}
+        self.overlaps = {}
+        self.absolute_overlap_error = {}
+        self.relative_overlap_error = {}
 
-    return {"method": method_list, "quadratic_forms": {}, "matvec_list": matvec_list}
+    def run(self):
+        zi_values = self.contour["Points"]
+        for i, zi in enumerate(zi_values):
+            print(f"Calculating inner products for z = {zi}")
+            initial_state = 1/(zi-self.integration_center)*self.phi # Change exact_eval to center of integration path in the future
+            for j, preconditioner in enumerate(self.preconds_labels):
+                # Use a tuple (i, j) as the key where i labels the zi value and j labels the preconditioner
+                if preconditioner == "None":
+                    self.temp_results[(i, j)] = calculateInnerProducts(self.H, self.phi, zi, initial_state, preconditioner=None, tol=self.tol, maxiter=self.max_iter)
+                elif preconditioner == "Diag":
+                    Ml_inv = QubitOperator('', zi) - get_diag_part_QubitOperator(self.H)
+                    Ml = inv(get_sparse_operator(Ml_inv))
+                    self.temp_results[(i, j)] = calculateInnerProducts(self.H, self.phi, zi, initial_state, preconditioner=Ml, tol=self.tol, maxiter=self.max_iter)
+        # Process the results
+        for j in range(len(self.preconds_labels)):
+            min_length = min([len(self.temp_results[(i, j)]) for i in range(len(zi_values))])
+            self.overlaps[j] = [sum_gauss_points(self.contour, [self.temp_results[(i, j)][k] for i in range(len(zi_values))]) for k in range(min_length)]
+            self.absolute_overlap_error[j] = (np.array(self.overlaps[j]) - self.exact_overlap).tolist()
+            self.relative_overlap_error[j] = (np.abs(self.absolute_overlap_error[j])/self.exact_overlap).tolist()
+            self.matvec = [i for i in range(min_length)]
 
 def fix_point(zi, H, b, x0=None, tol=1e-6, max_iter=100):
-    # Solves (zI-H)x=b using the fixed-point iteration method
+    """ Solves (zI-H)x=b using the fixed-point iteration method.
+    Does not seem to work; divergent behavior observed (20240828: need to scale spectrum of H?)
+    """
     # if not isinstance(H, LinearOperator):
     #     raise ValueError("A must be a scipy.sparse.linalg.LinearOperator")
     if x0 is None:
@@ -459,27 +554,6 @@ def fix_point(zi, H, b, x0=None, tol=1e-6, max_iter=100):
         method_list.append("Fixed Point")
         iter_number.append(k+1)
     return {"method": method_list, "expectation_values": expectation_values, "iterations": iter_number, "matvec_list": matvec_list, "vecvec_list": vecvec_list}
-
-# Write a test module for fix_point
-def test_davidson():
-    from model_H_utils import diag_dominant_herm_sparse
-    # Test fix_point
-    size = 4
-    A = diag_dominant_herm_sparse(size, diag_shift=20)
-    A_linear = LinearOperator(A.shape, matvec=lambda x: A @ x)
-    evals, evecs = eigh(A)
-    print("Eigenvalues:", evals)
-    gap = evals[1] - evals[0]
-    # define b to be the first eigenvector of A, plus some noise
-    b = evecs[:, 0] + 0.1*np.random.rand(size)
-    b = b/np.linalg.norm(b)
-    # b = b.reshape(-1,1)
-    zi = evals[0] + gap/2*np.exp(1j*np.pi/4*np.array([1,2,3]))
-    # x0_fix_point = [np.linalg.inv(z*np.eye(size)-np.diag(np.diag(A))) @ b for z in zi]
-    exact_solutions = [np.linalg.inv(z*np.eye(size)-A) @ b for z in zi]
-    output = davidson_lowest_eigenvalue(A_linear, b)
-    print("Obtained overlaps: ", output["expectation_values"][-1]) # Should print a dictionary with keys "method", "expectation_values", "iterations", "matvec_list", "vecvec_list"
-    print("Exact overlaps: ", [np.vdot(b, np.linalg.inv(zi[i]*np.eye(size)-A) @ b) for i in range(len(zi))])
 
 
 if __name__ == '__main__':
