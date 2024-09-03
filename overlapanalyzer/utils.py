@@ -187,7 +187,7 @@ def process_vector(vector, mag_threshold = 1e-10, angle_threshold=1e-4):
 def exp_val_higher_moment(H, v, k, return_all=True):
     '''
     Calculates expectation value of <v|H^k|v>.
-    Returns all moments if return_all is True.
+    Returns all moments [H^0, ..., H^k] if return_all is True.
     '''
     def is_hermitian(H, eps=1e-12):
         if issparse(H):
