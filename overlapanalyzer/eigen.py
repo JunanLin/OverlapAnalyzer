@@ -7,9 +7,9 @@ def get_exp_val_symmetries(v, n_spin_orb):
     Return expectation values of Sz, N, and S^2 operators for the given eigenvectors v (v assumed to be obtained from eigsh).
     """
     from openfermion import sz_operator, number_operator, s_squared_operator, get_sparse_operator
-    exp_sz = [v[:,i].T @ get_sparse_operator(sz_operator(int(n_spin_orb//2))) @ v[:,i] for i in range(len(v.T))]
-    exp_n = [v[:,i].T @ get_sparse_operator(number_operator(int(n_spin_orb))) @ v[:,i] for i in range(len(v.T))]
-    exp_s2 = [v[:,i].T @ get_sparse_operator(s_squared_operator(int(n_spin_orb//2))) @ v[:,i] for i in range(len(v.T))]
+    exp_sz = [np.real(v[:,i].T @ get_sparse_operator(sz_operator(int(n_spin_orb//2))) @ v[:,i]) for i in range(len(v.T))]
+    exp_n = [np.real(v[:,i].T @ get_sparse_operator(number_operator(int(n_spin_orb))) @ v[:,i]) for i in range(len(v.T))]
+    exp_s2 = [np.real(v[:,i].T @ get_sparse_operator(s_squared_operator(int(n_spin_orb//2))) @ v[:,i]) for i in range(len(v.T))]
     return exp_sz, exp_n, exp_s2
 
 def hf_occupation_list(n_electrons, n_unpaired):
@@ -19,6 +19,8 @@ def hf_occupation_list(n_electrons, n_unpaired):
     :param n_electrons: the total number of electrons
     :param n_unpaired: the number of unpaired electrons, support aliasing: n_unpaired = 's0' or 't1'
     :return: the occupation list
+
+    20240830: may remove if not useful
     """
     if n_unpaired == 's0':
         n_unpaired = 0
@@ -39,12 +41,12 @@ def sort_eigen(eigenvalues, eigenvectors):
 
     return sorted_eigenvalues, sorted_eigenvectors
 
-def calculate_lowest_eigen(matrix, n, is_hermitian=False):
+def calculate_lowest_eigen(matrix, n, is_hermitian=False, **kwargs):
     if is_hermitian:
         # If matrix is a csc or csr matrix, use eigsh
         if isinstance(matrix, (csc_matrix, csr_matrix)):
             print("Matrix is sparse Hermitian, using eigsh...")
-            eigenvalues, eigenvectors = eigsh(matrix, k=n, which='SA')
+            eigenvalues, eigenvectors = eigsh(matrix, k=n, v0=kwargs.get("v0"), which='SA')
         else:
             print("Matrix is Hermitian, using eigh...")
             eigenvalues, eigenvectors = np.linalg.eigh(matrix)
@@ -61,6 +63,55 @@ def calculate_lowest_eigen(matrix, n, is_hermitian=False):
     lowest_eigenvectors = sorted_eigenvectors[:, :n]
 
     return lowest_eigenvalues, lowest_eigenvectors
+
+def calculate_highest_eigen(matrix, n, is_hermitian=False, **kwargs):
+    if is_hermitian:
+        # If matrix is a csc or csr matrix, use eigsh
+        if isinstance(matrix, (csc_matrix, csr_matrix)):
+            print("Matrix is sparse Hermitian, using eigsh...")
+            eigenvalues, eigenvectors = eigsh(matrix, k=n, v0=kwargs.get("v0"), which='LA')
+        else:
+            print("Matrix is Hermitian, using eigh...")
+            eigenvalues, eigenvectors = np.linalg.eigh(matrix)
+    else:
+        # Otherwise, use eig
+        print("Matrix is not Hermitian, using eig...")
+        eigenvalues, eigenvectors = np.linalg.eig(matrix)
+
+    # Sort eigenvalues and corresponding eigenvectors
+    sorted_eigenvalues, sorted_eigenvectors = sort_eigen(eigenvalues, eigenvectors)
+
+    # Take the n highest eigenvalues and their corresponding eigenvectors
+    highest_eigenvalues = sorted_eigenvalues[-n:]
+    highest_eigenvectors = sorted_eigenvectors[:, -n:]
+
+    return highest_eigenvalues, highest_eigenvectors
+
+def calculate_lowest_and_highest_eigen(matrix, is_hermitian=False, **kwargs):
+    """
+    Calculate the smallest, mid, and largest eigenvalues.
+    2024-08-30: potential redundancy, check eigsh.calc_eigen!!!
+    """
+    if is_hermitian:
+        # If matrix is a csc or csr matrix, use eigsh
+        if isinstance(matrix, (csc_matrix, csr_matrix)):
+            print("Matrix is sparse Hermitian, using eigsh...")
+            eigenvalues_lowest, _ = eigsh(matrix, k=2, v0=kwargs.get("v0"), which='SA')
+            eigenvalues_highest, _ = eigsh(matrix, k=2, v0=kwargs.get("v0"), which='LA')
+            eigenvalues = np.array(eigenvalues_lowest.tolist() + eigenvalues_highest.tolist())
+        else:
+            print("Matrix is Hermitian, using eigh...")
+            eigenvalues = np.linalg.eigh(matrix)[0]
+    else:
+        # Otherwise, use eig
+        print("Matrix is not Hermitian, using eig...")
+        eigenvalues = np.linalg.eig(matrix)[0]
+
+    sorted_eigenvalues = np.sort(eigenvalues)
+    (E0, E1) = sorted_eigenvalues[0:2]
+    highest_eigenvalue = sorted_eigenvalues[-1]
+
+    return E0, E1, highest_eigenvalue
 
 def count_degeneracies(eigenvals, tolerance=1e-8):
     """
