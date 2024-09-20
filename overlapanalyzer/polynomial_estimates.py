@@ -50,15 +50,13 @@ def Legendre_step_est(Emin, Emax, Ec, H_shifted_n_exp_val):
     b_n = (2n+1)/2 sum_{j=0}^{n} p_n[j]/(n+1-j) (E_c-E_min)^j, which are coefficients of the expansion
     """
     assert type(H_shifted_n_exp_val) == np.ndarray
-    def _x(E, Emin, Emax):
-        return (2*E - Emin - Emax)/(Emax - Emin)
     
     def bn_list_Legendre(Emin, Emax, Ec, nmax):
         bn=[]
         for n in range(0, nmax+1):
             pn = legendre(n).c
             coeff_int = np.array([pn[i]/(n+1-i) for i in range(0,n+1)])
-            x_list = np.array([_x(Ec, Emin, Emax)**j - _x(Emin, Emin, Emax)**j for j in range(n+1, 0, -1)])
+            x_list = np.array([E_to_x(Ec, Emin, Emax)**j - E_to_x(Emin, Emin, Emax)**j for j in range(n+1, 0, -1)])
             bn.append((2*n+1)/(2)*np.dot(coeff_int, x_list))
         return np.array(bn)
     
