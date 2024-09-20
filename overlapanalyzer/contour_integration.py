@@ -2,6 +2,9 @@ import numpy as np
 from overlapanalyzer.eigen import evals_no_degen, find_subspace_indices, vecs_in_subspace, overlap_with_ON_vecs
 
 def _z(c, r, angle):
+    """
+    Get a complex number on the contour with center c, radius r, and angle angle.
+    """
     return c + r * np.exp(1j * angle)
 
 def get_contour(c, r, N, method='gauss'):
