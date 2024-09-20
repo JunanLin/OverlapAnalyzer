@@ -8,8 +8,7 @@ import scipy.sparse as sparse
 import scipy.optimize as optimize
 import scipy.sparse.linalg as linalg
 from scipy.sparse.linalg import gmres, bicgstab, spsolve, norm, inv, spilu, LinearOperator
-from .contour_integration import numerical_contour_integration
-
+from overlapanalyzer.contour_integration import numerical_contour_integration
 
 def convert_mol_data_to_xyz_format(mol_data):
     '''
