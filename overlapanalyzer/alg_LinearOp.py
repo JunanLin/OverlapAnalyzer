@@ -2,11 +2,13 @@
 import numpy as np
 import json
 import os
-from scipy.sparse.linalg import LinearOperator
+import copy
+from scipy.sparse.linalg import LinearOperator, eigsh
 from scipy.linalg import eigh, eigh_tridiagonal
 from scipy.sparse.linalg import gmres, inv
 import time
 from openfermion import QubitOperator, get_sparse_operator
+from openfermion.linalg import get_linear_qubit_operator_diagonal
 from krypy.linsys import LinearSystem, Gmres
 
 from overlapanalyzer.eigen import sort_eigen
@@ -74,7 +76,7 @@ class linear_solver():
 #     return diag
 
 def get_diag_part_QubitOperator(H: QubitOperator):
-    original_H = H
+    original_H = copy.deepcopy(H)
     # Diagonal part of a QubitOperator is the collection of terms which only contains PauliZ operators, plus the identity
     diag_operator = QubitOperator()
     for term, coeff in original_H.terms.items():
@@ -83,6 +85,17 @@ def get_diag_part_QubitOperator(H: QubitOperator):
                 coeff = coeff.real
             diag_operator += QubitOperator(term, coeff)
     return diag_operator
+
+def rescale_QubitOperator(H: QubitOperator, L: float, U: float):
+    """
+    Shift and rescale a QubitOperator according to the formula:
+    H -> (2 * H - (U+L))/(U-L)
+    If L is less than the minimum eigenvalue and U is greater than the maximum eigenvalue, 
+    then the result will be a normalized QubitOperator with eigenvalues between -1 and 1.
+    """
+    temp = 2/(U-L) * H
+    temp.constant -= (U+L)/(U-L)
+    return temp
 
 def get_id_coeff_QubitOperator(H: QubitOperator):
     """
@@ -555,6 +568,100 @@ def fix_point(zi, H, b, x0=None, tol=1e-6, max_iter=100):
         iter_number.append(k+1)
     return {"method": method_list, "expectation_values": expectation_values, "iterations": iter_number, "matvec_list": matvec_list, "vecvec_list": vecvec_list}
 
+def find_diag_QubitOperator_inverse(A: QubitOperator):
+    # Checks that A only contains Z and identity operators
+    # if not all(map(lambda x: x[1] == 'Z' or x[1] == 'I', A.terms.keys())):
+    #     raise ValueError("A must only contain Z and I operators")
+    # Find the inverse of the diagonal part of A
+    A_operator = get_sparse_operator(A)
+    Ainv_operator = inv(A_operator)
+    return Ainv_operator
+
+def Dyson_iteration(phi:np.array, H:QubitOperator, z, max_iter, tol):
+    from scipy.sparse.linalg import eigsh
+    # Separate H into H_0 (diagonal) and V (off-diagonal)
+    H_0_diag = get_diag_part_QubitOperator(H)
+    V = H - H_0_diag
+
+    # Compute the inverse of (z*I - H_0) as G_0 by inverting diagonal entries
+    G_0_inv_vec = 1. / get_linear_qubit_operator_diagonal(QubitOperator('', z) - H_0_diag)
+    G_0_inv = np.diag(G_0_inv_vec)
+
+    # Convert phi to a column vector if it is not already
+    if phi.ndim == 1:
+        phi = phi[:, np.newaxis]
+
+    # Initial computation of phi_tilde
+    phi_tilde = G_0_inv @ phi
+    phi_step = phi_tilde
+    # Initialize variables for iteration
+    norms = []
+    # print eigenvalues of G_0 @ V
+    print("Largest eigenvalues of G_0 @ V: ", eigsh(G_0_inv @ V, k=10, which='LM')[0])
+    for _ in range(max_iter):
+        # Compute phi_step
+        phi_step = G_0_inv @ (V @ phi_step)
+        
+
+        # Update phi_tilde
+        phi_tilde += phi_step
+
+        # Calculate norm and check convergence
+        current_norm = np.linalg.norm(phi_step)
+        norms.append(current_norm)
+        if current_norm < tol:
+            break
+
+    # Convert phi_tilde back to a 1D array if it was originally 1D
+    # if phi_tilde.shape[1] == 1:
+        # print("Converting phi_tilde to 1D array...")
+        # phi_tilde = phi_tilde.flatten()
+    return phi_tilde, norms
+
+class Dyson(CustomLinearSolver):
+    """
+    Solves (zI-H)x=b using the Dyson iteration method.
+    Variables:
+    tol: minimum norm of phi_step to continue iteration
+    exact_overlap: exact overlap of phi and phi_tilde
+    """
+    def __init__(self, H:QubitOperator, phi:np.array, contour:dict, max_iter:int, tol:float, exact_overlap:float):
+        self.method = "Dyson"
+        self.H = H
+        self.phi = phi
+        self.contour = contour
+        self.max_iter = max_iter
+        self.tol = tol
+        self.overlaps = {}
+        self.norms = {z: [] for z in self.contour["Points"]}
+        self.temp_results = {z: [] for z in self.contour["Points"]}
+        self.exact_overlap = exact_overlap
+    def run(self):
+        H_0_diag = get_diag_part_QubitOperator(self.H)
+        V = get_sparse_operator(self.H - H_0_diag)
+        for i, z in enumerate(self.contour["Points"]):
+            # G_0_vec = 1. / get_linear_qubit_operator_diagonal(QubitOperator('', z) - H_0_diag) # 20240910: cannot cast float64 to np.complex128 
+            # G_0 = np.diag(G_0_vec)
+            G_0 = inv(get_sparse_operator(QubitOperator('', z) - H_0_diag))
+            phi_tilde = G_0 @ self.phi
+            phi_step = phi_tilde
+            norms = []
+            print("Largest eigenvalues of G_0 @ V: ", eigsh(G_0 @ V, k=10, which='LM')[0])
+            for _ in range(self.max_iter):  
+                phi_step = G_0 @ (V @ phi_step)
+                phi_tilde += phi_step
+                current_norm = np.linalg.norm(phi_step)
+                norms.append(current_norm)
+                if current_norm < self.tol:
+                    break
+                self.temp_results[z].append(np.vdot(self.phi, phi_tilde))
+                self.norms[z].append(norms) 
+        # Process the results
+        min_length = min(len(self.temp_results[z]) for z in self.temp_results.keys())
+        self.overlaps = [sum_gauss_points(self.contour, [self.temp_results[z][k] for z in self.temp_results.keys()]) for k in range(min_length)]
+        self.absolute_overlap_error = (np.array(self.overlaps) - self.exact_overlap).tolist()
+        self.relative_overlap_error = (np.abs(self.absolute_overlap_error)/self.exact_overlap).tolist()
+        self.matvec = [2*i for i in range(min_length)]
 
 if __name__ == '__main__':
-    print(select_values_and_vectors(np.array([1,2,3,4,5]), np.array([[1,2,3,4,5],[2,4,5,9,3],[1,7,6,9,0],[3,2,6,7,1],[5,6,9,8,2]]), 6,7))
+    print(1./get_linear_qubit_operator_diagonal(QubitOperator('X0 Y1 Z2', 1.0)+QubitOperator('Z0 Z1', 2.0)+QubitOperator('X0', 3.0)+QubitOperator('', 4.0)))
