@@ -2,6 +2,8 @@ import math
 import os
 # import tequila as tq
 import numpy as np
+import pickle
+import json
 from scipy.linalg import ishermitian
 from scipy.sparse import csr_matrix, csc_matrix, issparse
 import scipy.sparse as sparse
@@ -9,6 +11,22 @@ import scipy.optimize as optimize
 import scipy.sparse.linalg as linalg
 from scipy.sparse.linalg import gmres, bicgstab, spsolve, norm, inv, spilu, LinearOperator
 from overlapanalyzer.contour_integration import numerical_contour_integration
+
+def save_dict(saving_dict, fileDir, filename):
+        '''
+        Saves a target dictionary in two formats:
+        - .pkl: Pickle format
+        - .json: JSON format
+        The function removes elements in the dictionary that are not serializable before saving as a .json file.
+        '''
+        with open(os.path.join(fileDir, filename+ ".pkl"), 'wb') as f:
+            pickle.dump(saving_dict, f)
+        # Remove the eigen_states from saving_dict, and save another copy of saving_dict using json
+        for key in saving_dict.keys():
+            if not isinstance(saving_dict[key],(dict, list, tuple, str, int, float, bool, bytes, type(None))):
+                saving_dict.pop(key)
+        with open(os.path.join(fileDir, filename + ".json"), 'w') as f:
+            json.dump(saving_dict, f)
 
 def convert_mol_data_to_xyz_format(mol_data):
     '''
@@ -199,14 +217,14 @@ def exp_val_higher_moment(H, v, k, return_all=True):
         print("Hermitian matrix H, using efficient method to compute moments.")
         n_evals = k//2 + 1
         vecs = {0: v}
-        moments = np.array([np.real_if_close(np.inner(v.conj(), v))])
+        moments = np.array([np.real_if_close(np.vdot(v, v))])
         for i in range(n_evals):
             vecs[i+1] = H @ vecs[i]
         for i in range(1, k+1):
             if i % 2 == 0:
-                moments = np.append(moments,np.real_if_close(np.inner(vecs[i//2].conj(), vecs[i//2])))
+                moments = np.append(moments,np.real_if_close(np.vdot(vecs[i//2], vecs[i//2])))
             else:
-                moments = np.append(moments, np.real_if_close(np.inner(vecs[i//2].conj(), vecs[i//2+1])))
+                moments = np.append(moments, np.real_if_close(np.vdot(vecs[i//2], vecs[i//2+1])))
         return moments if return_all else moments[-1]
     else:
         print("Non-Hermitian matrix H, using general method to compute moments.")
