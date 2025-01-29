@@ -102,8 +102,29 @@ class SymplecticPauli():
         self.x_array = np.append(self.x_array, x)
         self.z_array = np.append(self.z_array, z)
         self.coeff_array = np.append(self.coeff_array, coefficient)
-    def _apply_1_term_to_SparseVector
-    
+    def _apply_1_term_to_SparseVector(self, x, z, state):
+        new_state = SparseVector()
+        for index, value in state.data.items():
+            # Apply X (bit flip)
+            new_index = index ^ x
+            
+            # Apply Z (phase flip)
+            phase = (-1) ** bin(index & z).count('1')
+            
+            new_value = phase * value
+            
+            if new_index in new_state.data:
+                new_state.data[new_index] += new_value
+            else:
+                new_state.data[new_index] = new_value
+    def apply_to_SparseVector(self, state:SparseVector):
+        result = SparseVector()
+        result.assign_data(state.data)
+        for x, z, coeff in zip(self.x_array, self.z_array, self.coeff_array):
+            term_result = self._apply_1_term_to_SparseVector(x, z, result)
+            result += coeff * term_result
+        return result
+
 def term_to_symplectic(term):
     x = 0
     z = 0
@@ -117,7 +138,7 @@ def term_to_symplectic(term):
             z |= 1 << qubit
     return x, z
 
-def pauli_operator_to_symplectic(pauli_operator):
+def pauli_operator_to_symplectic(pauli_operator:QubitOperator):
     symplectic_pauli = SymplecticPauli()
     for term, coefficient in pauli_operator.terms.items():
         x, z = term_to_symplectic(term)
@@ -243,7 +264,7 @@ def test_arnoldi():
     assert np.isclose(lowest_eigenvalue, ground_state_energy)
 
 def test_arnoldi_molecular_ham():
-    from my_utils_read_ham import find_files
+    from overlapanalyzer.read_ham import find_files
     mol_name = 'h4_linear'
     num_electrons = 4
     num_orbitals = 8
@@ -291,8 +312,10 @@ def test_arnoldi_hubbard_ham():
     # assert np.isclose(lowest_eigenvalue, ground_state_energy)
 
 if __name__ == '__main__':
-    # test_apply_operator_to_state()
-    file_dir = os.path.dirname(__file__)
-    # convert_PauliOperator_File_to_SymplecticPauli_File('f2ppz2_Ir_f2ppy.data',os.path.join(file_dir, 'gen_hams/ham_qubit'))
-    symplectic = read_SymplecticPauli_file(os.path.join(file_dir,'gen_hams/ham_qubit/f2ppz2_Ir_f2ppy.pkl'))
-    print(symplectic.coeff_array)
+    A = QubitOperator('X0 Y1 Z2', 1.0) + QubitOperator('Y3 Z4', 2.0) + QubitOperator(' ', 20.0)
+    phi = SparseVector()
+    phi.add_entry('00000', 1)
+    A_symp = pauli_operator_to_symplectic(A)
+    phi_new = apply_Pauli_to_SparseVector(A, phi)
+    phi_new_symp = A_symp._apply_1_term_to_SparseVector(phi)
+    print(phi_new.data)
