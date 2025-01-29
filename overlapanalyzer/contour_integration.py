@@ -1,5 +1,5 @@
 import numpy as np
-from overlapanalyzer.eigen import evals_no_degen, find_subspace_indices, vecs_in_subspace, overlap_with_ON_vecs
+# from overlapanalyzer.eigen import evals_no_degen, find_subspace_indices, vecs_in_subspace, overlap_with_ON_vecs
 
 def _z(c, r, angle):
     """
