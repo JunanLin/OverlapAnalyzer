@@ -210,7 +210,7 @@ class CustomLinearSolver:
             attribute_list = ["tol", "inner_tol", "max_iter", "inner_matvec", "outer_matvec", "eigenvalues"]
             for attr in attribute_list:
                 dict_save[attr] = getattr(self, attr)
-            dict_save["overlaps"] = overlaps_with_vector_collection(vec_to_comp_overlap_with, self.eigenvectors)
+            dict_save["overlaps"] = overlaps_with_vector_collection(vec_to_comp_overlap_with, self.RitzVectors)
             dict_save["exact_overlap"] = exact_overlap
             dict_save['absolute_overlap_error'] = (np.array(dict_save["overlaps"]) - exact_overlap).tolist()
             dict_save["relative_overlap_error"] = (np.abs(dict_save['absolute_overlap_error'])/exact_overlap).tolist()
@@ -226,7 +226,7 @@ class CustomLinearSolver:
             dict_save["relative_overlap_error"] = (np.abs(dict_save['absolute_overlap_error'])/exact_overlap).tolist()
             with open(os.path.join(savedir, filename+f'_{self.method}.json'), 'w') as f:
                 json.dump(dict_save, f)
-        elif isinstance(self, GMRES):
+        elif isinstance(self, CustomGMRES):
             dict_save = {"method": self.method}
             attribute_list = ["tol", "max_iter", "overlaps", "matvec"]
             for attr in attribute_list:
@@ -238,23 +238,24 @@ class CustomLinearSolver:
                 json.dump(dict_save, f)
         
 class CustomDavidson(CustomLinearSolver):
-    def __init__(self, A, v, n_qubits, diag=None, use_range=False, low=None, high=None, tol=1e-8, inner_tol = 1e-3, max_iter=20):
-        if not isinstance(A, QubitOperator):
-            raise ValueError("A must be a OpenFermion QubitOperator")
-        self.A = get_sparse_operator(A)
+    def __init__(self, A, v, n_qubits, diag=None, use_range=False, low=None, high=None, tol=1e-8, inner_tol = 1e-3, max_iter=20, use_inv_diag=False):
+        self.method = "Davidson"
+        self.A = get_sparse_operator(A) if isinstance(A, QubitOperator) else A
         self.v = v
-        self.diag = diag if diag is not None else get_diag_part_QubitOperator(A)
-        self.use_range = use_range
         self.n_qubits = n_qubits
+        self.diag = diag if diag is not None else get_diag_part_QubitOperator(A) if isinstance(A, QubitOperator) else A.diagonal()
+        self.use_range = use_range
         self.low = low
         self.high = high
         self.tol = tol
         self.inner_tol = inner_tol
         self.max_iter = max_iter
-        self.eigenvalues = []
-        self.eigenvectors = []
+        self.use_inv_diag = use_inv_diag
+        self.RitzValues = []
+        self.RitzVectors = []
         self.outer_matvec = []
         self.inner_matvec = []
+        self.V = None
 
     def run(self):
         matvec_count = 0
@@ -278,6 +279,8 @@ class CustomDavidson(CustomLinearSolver):
         vecvec_count += 1
 
         time_init = time.time()
+        if self.use_inv_diag:
+            self.inv_diag = np.expand_dims(1/self.diag, axis=1)
         for i in range(self.max_iter):
             if i > 0:
                 H = np.pad(H, ((0, 1), (0, 1)), 'constant')
@@ -297,11 +300,11 @@ class CustomDavidson(CustomLinearSolver):
                 eval_selected, evec_selected = select_lowest_value_and_vectors(E_Ritz, c)
 
             if len(eval_selected) == 0:
-                self.eigenvalues.append(E_Ritz[i].tolist())
-                self.eigenvectors.append(V @ c[:, i:i+1])
+                self.RitzValues.append(E_Ritz[i].tolist())
+                self.RitzVectors.append(V @ c[:, i:i+1])
             else:
-                self.eigenvalues.append(eval_selected.tolist())
-                self.eigenvectors.append(V @ evec_selected)
+                self.RitzValues.append(eval_selected.tolist())
+                self.RitzVectors.append(V @ evec_selected)
             
             self.outer_matvec.append(matvec_count)
 
@@ -316,9 +319,13 @@ class CustomDavidson(CustomLinearSolver):
             # which cause matvec to increase by 1
             # If not, we need to solve a linear system to apply the inverse of the diagonal part to the residual vector
             # which will cause matvec to increase by n_iter (stored in self.inner_matvec)
-            r, n_iter = compute_inv_applied_to_state(E_Ritz[0], self.diag, r, self.n_qubits, tol=self.inner_tol)
-            r=r.reshape(-1,1)
-            self.inner_matvec.append(n_iter)
+            if self.use_inv_diag:
+                r = self.inv_diag * r
+                matvec_count += 1
+            else:
+                r, n_iter = compute_inv_applied_to_state(E_Ritz[0], self.diag, r, self.n_qubits, tol=self.inner_tol)
+                r=r.reshape(-1,1)
+                self.inner_matvec.append(n_iter)
             r = r - V @ (V.T @ r)
             vecvec_count += (2 * i + 3)
             r = r / np.linalg.norm(r)
@@ -328,6 +335,69 @@ class CustomDavidson(CustomLinearSolver):
             w = self.A @ r
             matvec_count += 1
             W = np.hstack((W, w))
+        self.V = V
+
+
+class CustomLanczos(CustomLinearSolver):
+    def __init__(self, A, v, tol=1e-8, max_iter=100):
+        self.method = "Lanczos"
+        self.A = get_sparse_operator(A) if isinstance(A, QubitOperator) else A
+        self.v = v
+        self.tol = tol
+        self.max_iter = max_iter
+        self.alphas = []
+        self.betas = []
+        self.RitzValues = []
+        self.RitzVectors = []
+        self.overlaps = []
+        self.V = None
+    def run(self):
+        v = self.v if self.v.ndim == 2 else self.v.reshape(-1, 1) # Ensure v is treated as a column vector
+        v1 = v / np.linalg.norm(v)
+        v_jm1 = v1
+        w1_prime = self.A @ v1
+        alpha = np.vdot(w1_prime, v1)
+        self.alphas.append(alpha)
+        w1 = w1_prime - alpha * v1
+        # Store the vector v1
+        self.V = copy.copy(v1)
+        w_jm1 = w1
+        v_jm1 = v1
+        for j in range(1, self.max_iter+1):
+            beta_j = np.linalg.norm(w_jm1)
+            if beta_j > self.tol:
+                v_j = w_jm1 / beta_j
+                w_jprime = self.A @ v_j
+                alpha_j = np.vdot(w_jprime, v_j)
+                w_j = w_jprime - alpha_j * v_j - beta_j * v_jm1
+                self.alphas.append(alpha_j)
+                self.betas.append(beta_j)
+                self.V = np.hstack((self.V, v_j))
+
+                # Update the vectors
+                v_jm1 = v_j
+                w_jm1 = w_j
+            else:
+                print(f"beta_j = {beta_j} < tol = {self.tol}, terminating at iteration {j}.")
+                break
+    def solve_Ritz(self, return_all_itrs=False):
+        if self.V is None:
+            self.run()
+        # Build the tridiagonal matrix from the alphas and betas
+        H = np.diag(self.alphas) + np.diag(self.betas, -1) + np.diag(self.betas, 1)
+        # if return_all_itrs, solve the eigenvalue problem for all sub-matrices of the tridiagonal matrix
+        if return_all_itrs:
+            self.RitzValues.append(self.alphas[0])
+            self.RitzVectors.append(self.V[:, :1])
+            for i in range(1, H.shape[0]):
+                H_sub = H[:i+1, :i+1]
+                w, v = np.linalg.eigh(H_sub)
+                self.RitzValues.append(w)
+                self.RitzVectors.append(self.V[:, :i+1] @ v)
+        else:
+            w, v = np.linalg.eigh(H)
+            self.RitzValues.append(w)
+            self.RitzVectors.append(self.V @ v)
 
 class CustomShiftedParallelLanczos(CustomLinearSolver):
     def __init__(self, A, v, eigsh_results, n_qubits, tol=1e-8, max_iter=100, eval_index=0, n_contour_pts=8, contour_endpoints=None):
@@ -476,18 +546,17 @@ def calculateInnerProducts(H_q, phi, zi, initial_state, preconditioner, tol=1e-5
     print("First 5 integrands: ", outList[:5])
     return outList
 
-class GMRES(CustomLinearSolver):
+class CustomGMRES(CustomLinearSolver):
     """
     GMRES method, currently using GMRES module from krypy.
     Future: Implement a custom GMRES method to keep track of the number of 
     matrix-vector and vector-vector multiplications using preconditioners.
     """
-    def __init__(self, H:QubitOperator, phi, eigsh_results, n_contour_pts, method="GMRES", tol=1e-5, max_iter=100, preconds_labels = ["None", "Diag"], eval_index=0, contour_endpoints=None):
+    def __init__(self, H:QubitOperator, phi, eigsh_results, n_contour_pts, tol=1e-5, max_iter=100, preconds_labels = ["None", "Diag"], eval_index=0, contour_endpoints=None):
         self.method = "GMRES"
         self.H = H
         self.phi = phi
         self.eigsh_results = eigsh_results
-        self.method = method
         # self.preconds = preconds
         self.preconds_labels = preconds_labels
         self.eval_index = eval_index
@@ -525,6 +594,28 @@ class GMRES(CustomLinearSolver):
             self.absolute_overlap_error[j] = (np.array(self.overlaps[j]) - self.exact_overlap).tolist()
             self.relative_overlap_error[j] = (np.abs(self.absolute_overlap_error[j])/self.exact_overlap).tolist()
             self.matvec = [i for i in range(min_length)]
+
+def resolvent_moments(H, v, contour_endpoints, n_contour_pts, max_moment, return_all=True):
+    """
+    Computes the moments of the resolvent operator, defined by the endpoints.
+    """
+    contour_dict = getContourDataFromEndPoints(contour_endpoints[0], contour_endpoints[1], n_contour_pts)
+    
+    n_evals = max_moment//2 + 1
+    vecs = {0: v}
+    moments = np.array([np.real_if_close(np.vdot(v, v))])
+    for i in range(n_evals):
+        for z in contour_dict['Points']:
+            my_solver = linear_solver(H, v, x_guess=None)
+            output_state, n_gmres_iter = my_solver.gmres_solve(tol=1e-6, maxiter=100)
+        vecs[i+1] = H @ vecs[i]
+    for i in range(1, max_moment+1):
+        if i % 2 == 0:
+            moments = np.append(moments,np.real_if_close(np.vdot(vecs[i//2], vecs[i//2])))
+        else:
+            moments = np.append(moments, np.real_if_close(np.vdot(vecs[i//2], vecs[i//2+1])))
+    return moments if return_all else moments[-1]
+
 
 def fix_point(zi, H, b, x0=None, tol=1e-6, max_iter=100):
     """ Solves (zI-H)x=b using the fixed-point iteration method.
@@ -664,4 +755,8 @@ class Dyson(CustomLinearSolver):
         self.matvec = [2*i for i in range(min_length)]
 
 if __name__ == '__main__':
-    print(1./get_linear_qubit_operator_diagonal(QubitOperator('X0 Y1 Z2', 1.0)+QubitOperator('Z0 Z1', 2.0)+QubitOperator('X0', 3.0)+QubitOperator('', 4.0)))
+    from overlapanalyzer.polynomial_majorisation_LB import K_matrix
+    A = K_matrix(-3, [-2,-1,0], [0.1,0.2,0.3])
+    my_lanczos = CustomLanczos(A, np.array([[1],[0],[0],[0]]))
+    my_lanczos.solve_Ritz(return_all_itrs=False)
+    print(my_lanczos.RitzValues)
