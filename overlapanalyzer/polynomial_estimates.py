@@ -56,7 +56,7 @@ def Legendre_step_est(Emin, Emax, Ec, H_shifted_n_exp_val):
         for n in range(0, nmax+1):
             pn = legendre(n).c
             coeff_int = np.array([pn[i]/(n+1-i) for i in range(0,n+1)])
-            x_list = np.array([E_to_x(Ec, Emin, Emax)**j - E_to_x(Emin, Emin, Emax)**j for j in range(n+1, 0, -1)])
+            x_list = np.array([rescale_E(Ec, Emin, Emax)**j - rescale_E(Emin, Emin, Emax)**j for j in range(n+1, 0, -1)])
             bn.append((2*n+1)/(2)*np.dot(coeff_int, x_list))
         return np.array(bn)
     
@@ -96,7 +96,7 @@ def an_list(xc, nmax):
     """
     return [-2/np.pi*np.arctan(np.sqrt((1-xc)/(1+xc)))+1] + [-2/(n*np.pi)*np.sin(n*np.arccos(xc)) for n in range(1, nmax)]
 
-def E_to_x(E, Emin, Emax):
+def rescale_E(E:np.array, Emin, Emax):
     """ A mapping from E to x in [-1, 1]. """
     return (2*E - Emin - Emax)/(Emax - Emin)
 
@@ -111,9 +111,9 @@ def Chebyshev_step_est(H:QubitOperator, phi, Lower, Upper, E0, E1, Ec, nmax):
     x_of_H = 1/(Upper - Lower) * (2*H - QubitOperator('', Lower + Upper))
     x_moment_values = np.array(exp_val_higher_moment(get_sparse_operator(x_of_H), phi, nmax, return_all=True))
     # x_moment_values = E_to_x(H_exp_vals, Lower, Upper)
-    x0 = E_to_x(E0, Lower, Upper)
-    x1 = E_to_x(E1, Lower, Upper)
-    xc = E_to_x(Ec, Lower, Upper)
+    x0 = rescale_E(E0, Lower, Upper)
+    x1 = rescale_E(E1, Lower, Upper)
+    xc = rescale_E(Ec, Lower, Upper)
     cn = an_list(xc, nmax)
     x0list = np.array([chebval(x0, cn[:n]) for n in range(1,nmax+1)]) # Chebyshev polynomial evaluated at x0
     # arranges x in reverse order since Chebyshev polynomial coeffs are in decreasing order
