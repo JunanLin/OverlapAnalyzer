@@ -7,8 +7,8 @@ from qcc_240202.utils import f2q_map
 from openfermion import (
     save_operator
 )
-from .read_ham import ensure_directory_exists, read_xyz
-from .utils import get_molecular_data
+from overlapanalyzer.read_ham import ensure_directory_exists, read_xyz
+from overlapanalyzer.utils import get_molecular_data
 import csv 
 
 def gen_ham_from_MD(mol_name, R10, basis='sto-3g'):
