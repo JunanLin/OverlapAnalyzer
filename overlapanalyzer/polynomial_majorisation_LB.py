@@ -305,7 +305,7 @@ class PB_linprog_params_from_eig:
     :param num_x_points: tuple of (num_0, num_1, ...) for the number of points in each region. Only used when use_exact_energies=False, and len must match definitions target_indices & dense_info.
     :param Energy_constraint_limits: tuple (Emin, Emax) defining the energy constraint limits; energies outside the range will not be used as constraints.
     """
-    def __init__(self, eig_results, target_indices, poly_degree, use_exact_energies, use_all_evals=False,
+    def __init__(self, eig_results, target_indices, use_exact_energies, use_all_evals=False,
                  use_cheb=True, rescale=True, bound_extension=None, dense_info=(None, None), num_x_points=None, Energy_constraint_limits=(float('-inf'), float('inf'))):
         # Store inputs as attributes
         local_vars = locals()
@@ -319,8 +319,12 @@ class PB_linprog_params_from_eig:
         self.unscaled_energies = eig_results['exact_energies_no_degen'] if use_all_evals else eig_results['exact_energies_truncated']
         self.exact_mask = (np.array(self.unscaled_energies) >= Energy_constraint_limits[0]) & (np.array(self.unscaled_energies) <= Energy_constraint_limits[1])
         self.exact_energies = self._to_x(self.unscaled_energies)
-        self.moments = eig_results['moments_rescaled'] if rescale else eig_results['moments']
-        self.M = np.array(self.moments[:poly_degree + 1])
+        self.moments = np.array(eig_results['moments_rescaled']) if rescale else np.array(eig_results['moments'])
+        self.max_poly_degree = len(self.moments) - 1
+
+        self.constraint_pts = self._get_exact_constraints() if use_exact_energies else self._get_dense_constraints()
+        self.A_ub_full = np.polynomial.chebyshev.chebvander(self.constraint_pts, self.max_poly_degree) if use_cheb else np.vander(self.constraint_pts, self.max_poly_degree + 1, increasing=True)
+        # self.M = np.array(self.moments[:poly_degree + 1])
 
         # Get range information and mask energies above overlap threshold
         # self.range_info = self._to_x(Energy_constraint_limits)
@@ -340,16 +344,6 @@ class PB_linprog_params_from_eig:
             return rescale_E(np.array(E), self.E0_rescale, self.Emax_rescale)
         else:
             return np.array(E)
-
-    def prepare_constraints(self):
-        """
-        Prepare constraints for linprog.
-        """
-        # Generate constraint points
-        if self.use_exact_energies:
-            self.constraint_pts = self._get_exact_constraints()
-        else:
-            self.constraint_pts = self._get_dense_constraints()
 
     def _get_exact_constraints(self):
         """
@@ -372,19 +366,16 @@ class PB_linprog_params_from_eig:
         # energy_constraints = np.concatenate(energy_constraints)
         return self._to_x(energy_constraints)
 
-    def get_A_ub(self):
+    def get_A_ub(self, poly_degree):
         """Return A_ub."""
-        if self.use_cheb:
-            return np.polynomial.chebyshev.chebvander(self.constraint_pts, self.poly_degree)
-        else:
-            return np.vander(self.constraint_pts, self.poly_degree + 1, increasing=True)
+        return self.A_ub_full[:,:poly_degree + 1]
 
-    def get_moment_values(self):
+    def get_moment_values(self, poly_degree):
         """Return computed moment values."""
         if self.use_cheb:
-            return chebyshev_matrix_from_degree(self.poly_degree) @ self.M
+            return (chebyshev_matrix_from_degree(self.max_poly_degree) @ self.moments)[:poly_degree + 1]
         else:
-            return self.M
+            return self.moments[:poly_degree + 1]
     
     def get_b_ub(self, target_indices, b_values):
         """Return b_ub values."""
@@ -397,6 +388,7 @@ class PB_linprog_params_from_eig:
                 b_recipe[index] = b_values[i]
             # Repeat the b values for the number of points in each region
             return np.repeat(b_recipe, self.num_x_points)
+    
     def get_constraint_pts(self):
         return self.constraint_pts
     
