@@ -12,21 +12,23 @@ import scipy.sparse.linalg as linalg
 from scipy.sparse.linalg import gmres, bicgstab, spsolve, norm, inv, spilu, LinearOperator
 from overlapanalyzer.contour_integration import numerical_contour_integration
 
-def save_dict(saving_dict, fileDir, filename):
-        '''
-        Saves a target dictionary in two formats:
-        - .pkl: Pickle format
-        - .json: JSON format
-        The function removes elements in the dictionary that are not serializable before saving as a .json file.
-        '''
+def save_dict(saving_dict, fileDir, filename, save_pkl=False):
+    '''
+    Saves a target dictionary in two formats:
+    - .pkl: Pickle format
+    - .json: JSON format
+    The function removes elements in the dictionary that are not serializable before saving as a .json file.
+    '''
+    if save_pkl:
         with open(os.path.join(fileDir, filename+ ".pkl"), 'wb') as f:
             pickle.dump(saving_dict, f)
-        # Remove the eigen_states from saving_dict, and save another copy of saving_dict using json
-        for key in saving_dict.keys():
-            if not isinstance(saving_dict[key],(dict, list, tuple, str, int, float, bool, bytes, type(None))):
-                saving_dict.pop(key)
-        with open(os.path.join(fileDir, filename + ".json"), 'w') as f:
-            json.dump(saving_dict, f)
+    # Remove the eigen_states from saving_dict, and save another copy of saving_dict using json
+    keys_list = list(saving_dict.keys())
+    for key in keys_list:
+        if not isinstance(saving_dict[key],(dict, list, tuple, str, int, float, bool, bytes, type(None))):
+            saving_dict.pop(key)
+    with open(os.path.join(fileDir, filename + ".json"), 'w') as f:
+        json.dump(saving_dict, f)
 
 def convert_mol_data_to_xyz_format(mol_data):
     '''
