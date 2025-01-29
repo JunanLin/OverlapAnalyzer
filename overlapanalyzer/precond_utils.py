@@ -7,17 +7,34 @@ import matplotlib.pyplot as plt
 # import pickle
 import csv
 import pandas as pd
-import ast
-
+import copy
 import os
 import numpy as np
 import scipy.sparse.linalg as spla
+from scipy.sparse import csc_matrix
 from openfermion import jw_configuration_state, load_operator, QubitOperator
 from overlapanalyzer.alg_LinearOp import get_diag_part_QubitOperator, get_sparse_operator
 from overlapanalyzer.read_ham import quick_load, load_mol_info, find_files
 from overlapanalyzer.iQCC import apply_iQCC_gens_to_state
-from overlapanalyzer.cost_comparison import getContourDataFromEigsh
-from overlapanalyzer.contour_integration import sum_gauss_points
+from overlapanalyzer.contour_integration import getContourDataFromEigsh, sum_gauss_points
+
+def approx_inv_QubitOpereator(A:QubitOperator, calc_residual=False, **kwargs):
+    """
+    Approximate the inverse of a diagonal QubitOperator.
+    Accurate up to first order in the expansion coefficients of the Pauli terms in A.
+    Works better when the identity part of A is dominant.
+    """
+    alpha_1 = A.constant
+    approx_inv = QubitOperator('', 1/alpha_1)
+    A_copy = copy.deepcopy(A)
+    A_copy.constant = 0
+    approx_inv -= 1/alpha_1**2 * A_copy
+    if calc_residual:
+        residual = A*approx_inv - QubitOperator('', 1)
+        print(f"Induced {kwargs.get('order')}-norm of residual: {residual.induced_norm(kwargs.get('order'))}")
+    return approx_inv
+
+
 
 class TestPrecond(unittest.TestCase):
     def calculateInnerProducts(self, H_q, phi, zi, initial_state, preconditioner, tol=1e-5):
@@ -224,8 +241,18 @@ def plotOverlapErrors(ham_directory, filename, dressed_ham=False, compareShifts=
 
 
 if __name__ == "__main__":
-    current_dir = os.path.dirname(__file__)
-    ham_directory = os.path.join(current_dir, 'hamiltonian_useful/lih_2.6')
-    filename = 'lih_2.6_4_12_s0'
-    genOverlapErrors(ham_directory, filename, dressed_ham=True)
-    # compareShifts(ham_directory, filename)
+
+    ham_directory = '/Users/junan/Documents/Research/Overlap/tests/ham_dir/h2o_2.0/ham_qubit/'
+    ferm_ham_directory = '/Users/junan/Documents/Research/Overlap/tests/ham_dir/h2o_2.0/ham_fer/'
+    filename = [f for f in os.listdir(ham_directory) if f.endswith('.data')][0]
+    H = load_operator(data_directory=ham_directory, file_name=filename, plain_text=True)
+    H_fermionic = load_operator(data_directory=ferm_ham_directory, file_name=filename, plain_text=True)
+    H_diag = get_diag_part_QubitOperator(H)
+    H_no_Id = copy.deepcopy(H)
+    H_no_Id.constant = 0 
+    norm_order = 2
+    # print(f"{norm_order}-norm of non-identity part of H: ", H_no_Id.induced_norm(norm_order))
+    # print(f"{norm_order}-norm of H*H_diag^(-1): ", (H*H_diag).induced_norm(norm_order))
+    H_approx_inv = approx_inv_QubitOpereator(H, calc_residual=True, order=norm_order)
+    print(f"Matrix {norm_order}-norm of non-identity part of H: ", spla.norm(get_sparse_operator()))
+    print("End of test.")
