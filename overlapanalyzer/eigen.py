@@ -94,28 +94,31 @@ def calc_eigen(fileDir, spin, num_eigs=10, use_eigsh=False, **kwargs):
         # Orthonormalize the eigenvectors within each degenerate subspace
         v_ON = orthonormalize(v_sorted, degens)
         print("Eigenstates computed.")
-        if spin == 's0':
-            # occ_list = hf_occupation_list(n_elec, 0)
-            hf_state_full = jw_configuration_state([i for i in range(n_elec)], n_spin_orb)
-        elif spin == 't1':
-            hf_state_full = jw_configuration_state([i for i in range(n_elec-1)] + [n_elec], n_spin_orb)
-        elif spin == 's1':
-            hf_state_full = 1/np.sqrt(2)*(jw_configuration_state([i for i in range(n_elec-1)] + [n_elec+1], n_spin_orb) - jw_configuration_state([i for i in range(n_elec-2)] + [n_elec-1, n_elec], n_spin_orb))
-        hf_state_full = np.expand_dims(hf_state_full, axis=1)
-        hf_state = jw_number_restrict_state(hf_state_full, n_elec, n_qubits=n_spin_orb)
+        if 'target_state' in kwargs.keys:
+            state = kwargs.get('target_state')
+        else: 
+            if spin == 's0':
+                # occ_list = hf_occupation_list(n_elec, 0)
+                hf_state_full = jw_configuration_state([i for i in range(n_elec)], n_spin_orb)
+            elif spin == 't1':
+                hf_state_full = jw_configuration_state([i for i in range(n_elec-1)] + [n_elec], n_spin_orb)
+            elif spin == 's1':
+                hf_state_full = 1/np.sqrt(2)*(jw_configuration_state([i for i in range(n_elec-1)] + [n_elec+1], n_spin_orb) - jw_configuration_state([i for i in range(n_elec-2)] + [n_elec-1, n_elec], n_spin_orb))
+            hf_state_full = np.expand_dims(hf_state_full, axis=1)
+            state = jw_number_restrict_state(hf_state_full, n_elec, n_qubits=n_spin_orb)
 
-        moments = exp_val_higher_moment(H_sparse, hf_state, 40, return_all=True)
-        moments_shifted = exp_val_higher_moment(H_sparse - moments[1]*identity(H_sparse.shape[0]), hf_state, 40, return_all=True)
+        moments = exp_val_higher_moment(H_sparse, state, 40, return_all=True)
+        moments_shifted = exp_val_higher_moment(H_sparse - moments[1]*identity(H_sparse.shape[0]), state, 40, return_all=True)
         (rescale_lower, rescale_upper) = kwargs.get('rescale_values') if kwargs.get('rescale_values') is not None else (emax, e0)
-        moments_rescaled = exp_val_higher_moment((2*H_sparse - (rescale_upper+rescale_lower)*identity(H_sparse.shape[0]))/(rescale_upper-rescale_lower), hf_state, 40, return_all=True)
-        overlaps = overlap_with_vectors(hf_state, v_ON, degens)
+        moments_rescaled = exp_val_higher_moment((2*H_sparse - (rescale_upper+rescale_lower)*identity(H_sparse.shape[0]))/(rescale_upper-rescale_lower), state, 40, return_all=True)
+        overlaps = overlap_with_vectors(state, v_ON, degens)
         threshold=kwargs.get('threshold', 0.0)
         leading_indices_and_gaps = compute_gaps(w_no_degen, overlaps, threshold=threshold)
         print("Exact HF overlap computed.")
         truncated_evals, truncated_overlaps = truncate_by_ovlp_threshold(w_no_degen, overlaps, threshold)
         multiplicity_list_large_ovlps = [degens[i] for i in range(len(degens)) if overlaps[i] > 1e-9]
         print("Multiplicities of significant overlaps: ", multiplicity_list_large_ovlps)
-        print("Symmetry expectation values of of initial state: ", get_exp_val_symmetries(hf_state, n_spin_orb, n_elec=n_elec))
+        print("Symmetry expectation values of of initial state: ", get_exp_val_symmetries(state, n_spin_orb, n_elec=n_elec))
         # print("Largest overlap and position: ", (overlaps_with_lowest[np.argmax(overlaps_with_lowest)], np.argmax(overlaps_with_lowest)))
         ensure_directory_exists(os.path.join(fileDir, 'eigen'))
         # save_operator(myiQCC.ham,file_name=filename, data_directory=dir+'/ham_dressed', allow_overwrite=True, plain_text=True)
