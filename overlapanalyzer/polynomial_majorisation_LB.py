@@ -371,27 +371,36 @@ class PB_linprog_params_from_eig:
         return self.A_ub_full[:,:poly_degree + 1]
 
     def get_moment_values(self, poly_degree):
-        """Return computed moment values."""
+        """
+        Return computed moment values.
+        Note: need to compute the chebyshev moments by applying the transformation matrix.
+        """
         if self.use_cheb:
             return (chebyshev_matrix_from_degree(self.max_poly_degree) @ self.moments)[:poly_degree + 1]
         else:
             return self.moments[:poly_degree + 1]
     
-    def get_b_ub(self, target_indices, b_values):
+    def get_b_ub(self, b_list):
         """Return b_ub values."""
         if self.use_exact_energies:        
-            full_b = gen_b_ub_from_length(target_indices, b_values, len(self.unscaled_energies))
+            full_b = gen_b_ub_from_length(self.target_indices, b_list, len(self.unscaled_energies))
             return full_b[self.exact_mask]
         else:
             b_recipe = np.zeros(len(self.bound_pairs))
             for i, index in enumerate(self.nonzero_b_indices):
-                b_recipe[index] = b_values[i]
+                b_recipe[index] = b_list[i]
             # Repeat the b values for the number of points in each region
             return np.repeat(b_recipe, self.num_x_points)
     
     def get_constraint_pts(self):
         return self.constraint_pts
     
+    def get_all_for_PolyBounds(self, poly_degree, b_list):
+        values = self.get_moment_values(poly_degree)
+        A_ub = self.get_A_ub(poly_degree)
+        b_ub = self.get_b_ub(b_list)
+        return values, A_ub, b_ub
+
 class PolyBounds():
     """
     Obtaining lower and upper bounds on the overlap using polynomial majorisation/minorisation.
@@ -505,7 +514,7 @@ class PolyBounds_new():
                 print(f"{bound_name} Optimization failed:", result.message)
                 self.bounds.append(np.nan)
         return self.LB_result, self.UB_result, self.bounds
-    def plot_results(self, constraint_pts, n_plot_points=1000, used_cheb=True, legend_anchor=(1,0.2), show_constraint_points=False, limit_adjust=(0,0), linewidth=1, show_spectrum=False, show_lowest_highest=False, exact_spectrum_obj=None, plot_title=None):
+    def plot_results(self, constraint_pts, n_plot_points=1000, used_cheb=True, legend_anchor=(1,0.2), show_constraint_points=False, limit_adjust=(0,0), linewidth=1, show_spectrum=False, show_lowest_highest=False, constraint_recipe_obj=None, plot_title=None):
         """
         constraint_pts: the constraint points used in the optimization.
         """
@@ -527,15 +536,15 @@ class PolyBounds_new():
         # Overlay the spectrum information
         if show_spectrum:
             ax2 = ax1.twinx()
-            exact_energies = exact_spectrum_obj.exact_energies
-            exact_overlaps = exact_spectrum_obj.exact_overlaps
+            exact_energies = constraint_recipe_obj.exact_energies
+            exact_overlaps = constraint_recipe_obj.exact_overlaps
             # non_degen_evals = non_degenerate_values(eig_results['exact_energies'], degens)
             ax2.stem(exact_energies, exact_overlaps, linefmt='grey', markerfmt=' ', basefmt='C0', label='Exact spectrum')
             ax2.set_ylabel('Overlap')
         # Mark E0_LB, Emax_UB on the x-axis
         if show_lowest_highest:
-            ax1.axvline(x=exact_spectrum_obj.exact_energies[0], color='gray', linestyle=':')
-            ax1.axvline(x=exact_spectrum_obj.exact_energies[-1], color='gray', linestyle=':')
+            ax1.axvline(x=constraint_recipe_obj.exact_energies[0], color='gray', linestyle=':')
+            ax1.axvline(x=constraint_recipe_obj.exact_energies[-1], color='gray', linestyle=':')
         if show_constraint_points:
             ax1.scatter(constraint_pts, [0 for _ in range(len(constraint_pts))], color='pink', marker='|', zorder=4)
             # print("Constraint points: ", self.constraint_pts)
@@ -574,8 +583,47 @@ def random_distr(num_evals, major_ovlp=0.6, max_ovlp_index=1, energy_bounds=(-1,
     overlaps = np.insert(small_probs, max_ovlp_index, major_ovlp)
     return (evals, overlaps)
 
+class MultStateBounds:
+    """
+    Resolves the bounds for multiple states using an "outer" linear program loop.
+    """
+    def __init__(self, F, l, u):
+        if F.shape[0] != len(l) or F.shape[0] != len(u):
+            raise ValueError(f"# rows in F: {F.shape[1]} must match the length of l: {len(l)} and u: {len(u)}.")
+        if F.shape[0] < F.shape[1]:
+            raise ValueError(f"F must have more rows {F.shape[0]} than columns {F.shape[1]}.")
+        self.F = F
+        self.l = l
+        self.u = u
+    def solve(self):
+        self.lb_P_list = []
+        self.ub_P_list = []
+        A_ub = np.vstack((self.F, -self.F))
+        b_ub = np.hstack((self.u, -self.l))
+        for i in range(self.F.shape[1]):
+            unit_vector = np.zeros(self.F.shape[1])
+            unit_vector[i] = 1
+            ms_lb = linprog(unit_vector, A_ub=A_ub, b_ub=b_ub, bounds=(0, 1))
+            ms_ub = linprog(-unit_vector, A_ub=A_ub, b_ub=b_ub, bounds=(0, 1))
+            self.lb_P_list.append(np.dot(unit_vector, ms_lb.x))
+            self.ub_P_list.append(np.dot(unit_vector, ms_ub.x)) # Note the cancellation of negative sign
+        return self.lb_P_list, self.ub_P_list
 
-
+def get_MS_l_u(constraint_recipe:PB_linprog_params_from_eig, F:np.array, poly_degree:int):
+    """
+    Generate the l and u vectors for the MultStateBounds class.
+    """
+    l = []
+    u = []
+    for b_values in F:
+        values = constraint_recipe.get_moment_values(poly_degree)
+        A_ub = constraint_recipe.get_A_ub(poly_degree)
+        b_ub = constraint_recipe.get_b_ub(b_values)
+        poly_bounds = PolyBounds_new(values, A_ub, b_ub)
+        poly_bounds.optimize()
+        l.append(poly_bounds.bounds[0])
+        u.append(poly_bounds.bounds[1])
+    return np.array(l), np.array(u)
 
 class CauchyLB():
     """
@@ -650,8 +698,7 @@ def visualize_LBs(exact_energies, Ritz_energies, K_evals, epsilon):
     plt.show()
 
 if __name__ == "__main__":
-    test_energies = np.array([-5, -1, 0, 1, 3, 5])
-    target_indices = [2, 3]
-    bound_pairs = gen_bound_pairs(test_energies, 0.2)
-
-    print(np.linalg.inv(chebyshev_matrix_from_degree(5)))
+    test = MultStateBounds(np.array([[1, 1], [1, 1/2]]), np.array([0.4, 0.35]), np.array([0.8, 0.6]))
+    lb_list, ub_list = test.solve()
+    print("Lower bounds: ", lb_list)
+    print("Upper bounds: ", ub_list)
