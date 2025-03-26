@@ -11,6 +11,13 @@ from overlapanalyzer.read_ham import ensure_directory_exists, read_xyz
 from overlapanalyzer.utils import get_molecular_data
 import csv 
 
+class CustomMole(gto.Mole):
+    # Use this class for constructing molecular Hamiltonians etc.
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    
+
 def gen_ham_from_MD(mol_name, R10, basis='sto-3g'):
     """
     Generates Hamiltonian for a molecule from pre-stored molecular data.
@@ -111,36 +118,41 @@ def gen_hamiltonian(fileDir, mol_name, mode, small_atom_basis, **kwargs):
     
     # h_ferm = construct_fermionic_operator(mol, n_elec=n_elec, n_orbs=n_orbs, mo=mf.mo_coeff)
     if kwargs.get('create_CAS')==True:
-        if kwargs.get('spin') == 's0':
+        CAS_str = 'CAS'
+        if kwargs.get('spin') == 's0' or 's1':
             mf = scf.RHF(mol).run()
         elif kwargs.get('spin') == 't1':
             mf = scf.ROHF(mol).run()
         else:
             raise ValueError("Invalid spin: must be 's0' or 't1'")
+        hf_energy = mf.e_tot
         n_elec = kwargs.get('n_elec')
-        n_orbs = kwargs.get('n_orbs')
-        mycas = mcscf.CASCI(mf,n_orbs, n_elec)
+        n_spin_orbs = kwargs.get('n_spin_orbs') 
+        n_spatial_orbs = n_spin_orbs // 2 # Here the input n_orbs means the number of spin orbitals, so need to /2
+        mycas = mcscf.CASCI(mf,n_spatial_orbs, n_elec)
         # Save a info.csv file with n_elec and n_orbs
-        with open(os.path.join(fileDir, 'info.csv'), 'w') as f:
-            writer = csv.writer(f)
-            writer.writerow(['N_electron', 'N_spin_orb'])
-            writer.writerow([n_elec, n_orbs])
+        csv_filename = 'CAS_info.csv'
 
         h1e_cas, ecore = mycas.get_h1eff()
         h2e_cas = mycas.get_h2eff()
-        h2e_cas = ao2mo.addons.restore('1', h2e_cas, kwargs.get('n_orbs'))
+        h2e_cas = ao2mo.addons.restore('1', h2e_cas, n_spatial_orbs)
         h2e_cas = h2e_cas.transpose(0, 2, 3, 1)
         h_ferm = construct_fermionic_operator_from_mcscf(h1e_cas, h2e_cas, ecore)
         if kwargs.get('run_CASCI')==True:
             mycas.kernel()
     else:
+        CAS_str=''
         h_ferm = construct_fermionic_operator(mol)
+        mf = scf.RHF(mol).run()
+        hf_energy = mf.e_tot # These two lines are redundant, change construct_fermionic_operator to a method under CustomMole class for the future
         n_elec = mol.nelectron
-        n_orbs = 2*mol.nao
-        with open(os.path.join(fileDir, 'info.csv'), 'w') as f:
-            writer = csv.writer(f)
-            writer.writerow(['N_electron', 'N_spin_orb'])
-            writer.writerow([n_elec, n_orbs])
+        n_spin_orbs = 2*mol.nao
+        csv_filename = 'info.csv'
+    
+    with open(os.path.join(fileDir, csv_filename), 'w') as f:
+        writer = csv.writer(f)
+        writer.writerow(['N_electron', 'N_spin_orb'])
+        writer.writerow([n_elec, n_spin_orbs])
     # if spin == 's0':
     #     hf_state = jw_configuration_state(hf_occupation_list(n_elec, 0), 2*n_orbs)
     # elif spin == 't1':
@@ -148,8 +160,6 @@ def gen_hamiltonian(fileDir, mol_name, mode, small_atom_basis, **kwargs):
     # h_ferm_op = get_sparse_operator(h_ferm)
     # print("Checking expectation of h_ferm WRT HF state: ", vdot(hf_state, h_ferm_op.dot(hf_state)))
 
-    # Ensure directory exists
-    # directory_name = os.path.join(fileDir, 'gen_hams')
     ensure_directory_exists(os.path.join(fileDir, 'ham_fer'))
     if mode == "from_MD" or mode == "h_chain":
         geometry = f"_{kwargs.get('R10')/10}"
@@ -158,9 +168,9 @@ def gen_hamiltonian(fileDir, mol_name, mode, small_atom_basis, **kwargs):
     # Save ecore, h1e_cas, h2e_cas
     # with open(os.path.join(fileDir, 'ham_fer', mol_name+geometry+f"_mo_ints_{kwargs.get('n_elec')}_{kwargs.get('n_orbs')}_{kwargs.get('spin')}.json"), 'w') as f:
     #     json.dump({'SCF energy': mf.e_tot,'basis': mol.basis, 'ecore': ecore, 'h1e_cas': h1e_cas.tolist(), 'h2e_cas': h2e_cas.tolist()}, f)
-    filename_to_save = mol_name+geometry+f"_{n_elec}_{n_orbs}_{kwargs.get('spin')}.data"
+    filename_to_save = mol_name+CAS_str+geometry+f"_{n_elec}_{n_spin_orbs}_{kwargs.get('spin')}.data"
     save_operator(h_ferm,file_name=filename_to_save, data_directory=os.path.join(fileDir, 'ham_fer'), allow_overwrite=True, plain_text=True)
-    return filename_to_save
+    return hf_energy
 
 if __name__ == "__main__":
     current_dir = os.path.dirname(__file__)
