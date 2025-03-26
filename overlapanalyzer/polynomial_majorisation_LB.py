@@ -5,6 +5,7 @@ import pandas as pd
 from numpy.polynomial import chebyshev
 from numpy.polynomial import Polynomial
 from scipy.optimize import minimize, NonlinearConstraint, linprog
+# from scipy.interpolate import interp1d
 from scipy.special import eval_chebyt
 import matplotlib.pyplot as plt
 # Uncomment for production plotting with LaTeX (slower)
@@ -216,7 +217,7 @@ def gen_bound_pairs(value_list, bound_extension, E0_LB=None, Emax_UB = None):
         raise ValueError("The provided Emax_UB must be greater than the last value.")
     return np.array([(E0_LB, value_list[0]+gaps[0])] + [(value_list[i]-gaps[i-1], value_list[i]+gaps[i]) for i in range(1, len(value_list) - 1)] + [(value_list[-1]-gaps[-1], Emax_UB)])
 
-def compute_boundaries(target_indices, L):
+def compute_boundaries(target_indices, L, merge_consec_indices=True):
     boundaries = []
     target_indices = sorted(target_indices)  # Ensure indices are sorted
     previous_index = 0
@@ -305,8 +306,8 @@ class PB_linprog_params_from_eig:
     :param num_x_points: tuple of (num_0, num_1, ...) for the number of points in each region. Only used when use_exact_energies=False, and len must match definitions target_indices & dense_info.
     :param Energy_constraint_limits: tuple (Emin, Emax) defining the energy constraint limits; energies outside the range will not be used as constraints.
     """
-    def __init__(self, eig_results, target_indices, use_exact_energies, use_all_evals=False,
-                 use_cheb=True, rescale=True, bound_extension=None, dense_info=(None, None), num_x_points=None, Energy_constraint_limits=(float('-inf'), float('inf'))):
+    def __init__(self, eig_results, target_indices, use_exact_energies, use_all_evals=False, custom_constraints=None,
+                 use_cheb=False, rescale=True, bound_extension=None, dense_info=(None, None), num_x_points=None, Energy_constraint_limits=(float('-inf'), float('inf'))):
         # Store inputs as attributes
         local_vars = locals()
         for name, value in local_vars.items():
@@ -318,27 +319,25 @@ class PB_linprog_params_from_eig:
         self.exact_overlaps = eig_results['overlaps'] if use_all_evals else eig_results['overlaps_truncated']
         self.unscaled_energies = eig_results['exact_energies_no_degen'] if use_all_evals else eig_results['exact_energies_truncated']
         self.exact_mask = (np.array(self.unscaled_energies) >= Energy_constraint_limits[0]) & (np.array(self.unscaled_energies) <= Energy_constraint_limits[1])
-        self.exact_energies = self._to_x(self.unscaled_energies)
+        self.exact_energies = self._rescale(self.unscaled_energies)
         self.moments = np.array(eig_results['moments_rescaled']) if rescale else np.array(eig_results['moments'])
         self.max_poly_degree = len(self.moments) - 1
 
-        self.constraint_pts = self._get_exact_constraints() if use_exact_energies else self._get_dense_constraints()
+        if custom_constraints is not None:
+            self.constraint_pts = custom_constraints
+        else:
+            # Validate inputs
+            if not use_exact_energies and (bound_extension is None or dense_info is None or num_x_points is None):
+                raise ValueError("(bound_extension, dense_size, num_x_points) are required when use_exact_energies=False.")
+
+            # Below, we use a symmetric bound extension for the ground and highest excited states in gen_bound_pairs; can be changed in future
+            if not use_exact_energies:
+                self.bound_pairs, self.incl_endpoints, self.nonzero_b_indices = process_bound_pairs(gen_bound_pairs(self.unscaled_energies, bound_extension), target_indices, dense_info)
+
+            self.constraint_pts = self._get_exact_constraints() if use_exact_energies else self._get_dense_constraints()
         self.A_ub_full = np.polynomial.chebyshev.chebvander(self.constraint_pts, self.max_poly_degree) if use_cheb else np.vander(self.constraint_pts, self.max_poly_degree + 1, increasing=True)
-        # self.M = np.array(self.moments[:poly_degree + 1])
 
-        # Get range information and mask energies above overlap threshold
-        # self.range_info = self._to_x(Energy_constraint_limits)
-        # self.truncated_energies, self.truncated_overlaps = truncate_by_ovlp_threshold(self.exact_energies, self.all_overlaps, ovlp_threshold)
-
-        # Validate inputs
-        if not use_exact_energies and (bound_extension is None or dense_info is None or num_x_points is None):
-            raise ValueError("(bound_extension, dense_size, num_x_points) are required when use_exact_energies=False.")
-
-        # Below, we use a symmetric bound extension for the ground and highest excited states in gen_bound_pairs; can be changed in future
-        if not use_exact_energies:
-            self.bound_pairs, self.incl_endpoints, self.nonzero_b_indices = process_bound_pairs(gen_bound_pairs(self.unscaled_energies, bound_extension), target_indices, dense_info)
-
-    def _to_x(self, E):
+    def _rescale(self, E):
         """Rescale energies if rescale=True."""
         if self.rescale:
             return rescale_E(np.array(E), self.E0_rescale, self.Emax_rescale)
@@ -351,7 +350,7 @@ class PB_linprog_params_from_eig:
         """
         exact_energies = np.array(self.unscaled_energies)
         energies_within_limits = exact_energies[self.exact_mask]
-        return self._to_x(energies_within_limits)
+        return self._rescale(energies_within_limits)
 
     def _get_dense_constraints(self):
         """
@@ -364,7 +363,7 @@ class PB_linprog_params_from_eig:
             if lower > self.Energy_constraint_limits[0] and upper < self.Energy_constraint_limits[1]:
                 energy_constraints.extend(np.linspace(lower, upper, self.num_x_points[i], endpoint=self.incl_endpoints[i]))
         # energy_constraints = np.concatenate(energy_constraints)
-        return self._to_x(energy_constraints)
+        return self._rescale(energy_constraints)
 
     def get_A_ub(self, poly_degree):
         """Return A_ub."""
@@ -382,7 +381,11 @@ class PB_linprog_params_from_eig:
     
     def get_b_ub(self, b_list):
         """Return b_ub values."""
-        if self.use_exact_energies:        
+        if self.custom_constraints is not None:
+            if len(self.custom_constraints) != len(b_list):
+                raise ValueError("Length of b_list must match the number of custom constraints.")
+            return b_list
+        elif self.use_exact_energies:        
             full_b = gen_b_ub_from_length(self.target_indices, b_list, len(self.unscaled_energies))
             return full_b[self.exact_mask]
         else:
@@ -400,6 +403,13 @@ class PB_linprog_params_from_eig:
         A_ub = self.get_A_ub(poly_degree)
         b_ub = self.get_b_ub(b_list)
         return values, A_ub, b_ub
+    def get_exact_ovlp(self, b_list, b_list_len_eig=None):
+        """Return the exact (linear combination of) overlap defined by the b_list"""
+        if self.custom_constraints is not None:
+            return np.dot(self.exact_overlaps, b_list_len_eig)
+        else:
+            full_b = gen_b_ub_from_length(self.target_indices, b_list, len(self.unscaled_energies))
+            return np.dot(self.exact_overlaps, full_b)
 
 class PolyBounds_new():
     """
@@ -407,15 +417,27 @@ class PolyBounds_new():
     :param values: list of values defining the objective function
     :param A_ub: matrix A_ub for linprog
     :param b_ub: vector b_ub for linprog
+    :param constraint_pts: x-values corresponding to b_ub
     :param P_exact: exact overlap value
     """
-    def __init__(self, values, A_ub, b_ub, P_exact=None):
+    def __init__(self, values, A_ub, b_ub, constraint_pts, P_exact=None):
         self.values = values
         self.A_ub = A_ub
         self.b_ub = b_ub
+        self.constraint_pts = constraint_pts
         self.poly_degree = len(values) - 1
         if P_exact is not None:
             print("Exact overlap: ", P_exact)
+    
+    def compute_chebyshev_coeffs(self, n):
+        """Computes Chebyshev approximation coefficients."""
+        x_min, x_max = self.constraint_pts[0], self.constraint_pts[-1]
+        chebyshev_nodes = np.cos((2*np.arange(1, n+2)-1) / (2*(n+1)) * np.pi)  # In [-1,1]
+        x_nodes = 0.5 * (x_max - x_min) * chebyshev_nodes + 0.5 * (x_max + x_min)  # Map to [x_min, x_max]
+        y_nodes = np.interp(x_nodes, self.constraint_pts, self.b_ub)
+        coeffs = chebyshev.chebfit(chebyshev_nodes, y_nodes, n)
+        return coeffs
+    
     def optimize(self, bound=1e20, method='highs', linprog_options={}):
         print("Condition number for A: ", np.linalg.cond(self.A_ub))
         self.LB_result = linprog(-self.values, A_ub=self.A_ub, b_ub=self.b_ub, bounds=(-bound, bound), method=method, options=linprog_options)
@@ -427,20 +449,29 @@ class PolyBounds_new():
             if result.success:
                 print(f"{bound_name} Optimal parameters found:")
                 print("c_i =", result.x)
-                bound = np.dot(self.values,result.x)
+                bound = np.dot(self.values, result.x)
                 self.bounds.append(bound)
                 print(f"Overlap {bound_name}: ", bound)
             else:
                 print(f"{bound_name} Optimization failed:", result.message)
                 self.bounds.append(np.nan)
+        
+        # Compute and store Chebyshev approximation value
+        self.chebyshev_coeffs = self.compute_chebyshev_coeffs(n=self.poly_degree)
+        self.chebyshev_approximation = np.dot(self.values, self.chebyshev_coeffs)
+        print("Chebyshev Approximation Value: ", self.chebyshev_approximation)
+        
         return self.LB_result, self.UB_result, self.bounds
-    def plot_results(self, constraint_pts, n_plot_points=1000, used_cheb=True, legend_anchor=(1,0.2), show_constraint_points=False, limit_adjust=(0,0), linewidth=1, show_spectrum=False, show_lowest_highest=False, constraint_recipe_obj=None, plot_title=None):
+    
+    def plot_results(self, constraint_pts, n_plot_points=1000, used_cheb=True, legend_anchor=(1,0.2), show_constraint_points=False, limit_adjust=(0,0), linewidth=1, show_spectrum=False, show_lowest_highest=False, constraint_recipe_obj=None, plot_title=None, plot_chebyshev=False, truncate_lower=None):
         """
         constraint_pts: the constraint points used in the optimization.
         """
         poly_plot_points = np.linspace(constraint_pts[0], constraint_pts[-1], n_plot_points)
+        if truncate_lower is not None:
+            poly_plot_points_lower = np.linspace(constraint_pts[0], constraint_pts[-1]-(constraint_pts[-1]-constraint_pts[-0])*truncate_lower, n_plot_points)
         LB_polynomial = chebyshev.Chebyshev(self.LB_result.x) if used_cheb else Polynomial(self.LB_result.x)
-        LB_polynomial_values = LB_polynomial(poly_plot_points)
+        LB_polynomial_values = LB_polynomial(poly_plot_points) if truncate_lower is None else LB_polynomial(poly_plot_points_lower)
         UB_polynomial = chebyshev.Chebyshev(self.UB_result.x) if used_cheb else Polynomial(self.UB_result.x)
         UB_polynomial_values = UB_polynomial(poly_plot_points)
         f_values = self.b_ub
@@ -448,12 +479,16 @@ class PolyBounds_new():
         fig = plt.figure()
         ax1 = fig.add_subplot(111)
         # Plot the polynomial
-        ax1.plot(poly_plot_points, LB_polynomial_values, label='Minorizing Poly', color='blue', linewidth=linewidth)
+        ax1.plot(poly_plot_points if truncate_lower is None else poly_plot_points_lower, LB_polynomial_values, label='Minorizing Poly', color='blue', linewidth=linewidth)
         ax1.plot(poly_plot_points, UB_polynomial_values, label='Majorizing Poly', color='green', linewidth=linewidth)
 
         # Plot the exact piecewise linear function
         ax1.plot(constraint_pts, f_values, label=r'$f_0(E)$', linestyle='--', color='red', linewidth=linewidth)
         # Overlay the spectrum information
+        if plot_chebyshev:
+            t_vals = 2 * (poly_plot_points - self.constraint_pts[0]) / (self.constraint_pts[-1] - self.constraint_pts[0]) - 1  # Map x to [-1,1]
+            y_cheb = chebyshev.chebval(t_vals, self.chebyshev_coeffs)
+            ax1.plot(poly_plot_points, y_cheb, label=f"Chebyshev Approximation", color='magenta', linewidth=linewidth)
         if show_spectrum:
             ax2 = ax1.twinx()
             exact_energies = constraint_recipe_obj.exact_energies
@@ -479,6 +514,7 @@ class PolyBounds_new():
         plt.tight_layout()
         # plt.grid(True)
         plt.show()
+
 
 def moments_from_distr(evals, overlaps, degree):
     """
@@ -509,7 +545,7 @@ class MultStateBounds:
     """
     def __init__(self, F, l, u):
         if F.shape[0] != len(l) or F.shape[0] != len(u):
-            raise ValueError(f"# rows in F: {F.shape[1]} must match the length of l: {len(l)} and u: {len(u)}.")
+            raise ValueError(f"# rows in F: {F.shape[0]} must match the length of l: {len(l)} and u: {len(u)}.")
         if F.shape[0] < F.shape[1]:
             raise ValueError(f"F must have more rows {F.shape[0]} than columns {F.shape[1]}.")
         self.F = F
@@ -520,16 +556,19 @@ class MultStateBounds:
         self.ub_P_list = []
         A_ub = np.vstack((self.F, -self.F))
         b_ub = np.hstack((self.u, -self.l))
-        for i in range(self.F.shape[1]):
-            unit_vector = np.zeros(self.F.shape[1])
-            unit_vector[i] = 1
-            ms_lb = linprog(unit_vector, A_ub=A_ub, b_ub=b_ub, bounds=(0, 1))
-            ms_ub = linprog(-unit_vector, A_ub=A_ub, b_ub=b_ub, bounds=(0, 1))
-            self.lb_P_list.append(np.dot(unit_vector, ms_lb.x))
-            self.ub_P_list.append(np.dot(unit_vector, ms_ub.x)) # Note the cancellation of negative sign
+        for i in range(self.F.shape[1]+1):
+            if i < self.F.shape[1]:
+                specification_vector = np.zeros(self.F.shape[1])
+                specification_vector[i] = 1
+            else:
+                specification_vector = np.ones(i) # Add a final entry: the best combined overlap
+            ms_lb = linprog(specification_vector, A_ub=A_ub, b_ub=b_ub, bounds=(0, 1))
+            ms_ub = linprog(-specification_vector, A_ub=A_ub, b_ub=b_ub, bounds=(0, 1))
+            self.lb_P_list.append(np.dot(specification_vector, ms_lb.x))
+            self.ub_P_list.append(np.dot(specification_vector, ms_ub.x)) # Note the cancellation of negative sign
         return self.lb_P_list, self.ub_P_list
 
-def get_MS_l_u(constraint_recipe:PB_linprog_params_from_eig, F:np.array, poly_degree:int):
+def get_MS_l_u(constraint_recipe:PB_linprog_params_from_eig, F:np.array, poly_degree:int, visualize=False, used_cheb=False):
     """
     Generate the l and u vectors for the MultStateBounds class.
     """
@@ -539,8 +578,10 @@ def get_MS_l_u(constraint_recipe:PB_linprog_params_from_eig, F:np.array, poly_de
         values = constraint_recipe.get_moment_values(poly_degree)
         A_ub = constraint_recipe.get_A_ub(poly_degree)
         b_ub = constraint_recipe.get_b_ub(b_values)
-        poly_bounds = PolyBounds_new(values, A_ub, b_ub)
+        poly_bounds = PolyBounds_new(values, A_ub, b_ub, constraint_pts=constraint_recipe.get_constraint_pts())
         poly_bounds.optimize()
+        if visualize:
+            poly_bounds.plot_results(constraint_pts=constraint_recipe.get_constraint_pts(), constraint_recipe_obj=constraint_recipe, show_constraint_points=True, show_spectrum=True, used_cheb=used_cheb)
         l.append(poly_bounds.bounds[0])
         u.append(poly_bounds.bounds[1])
     return np.array(l), np.array(u)
@@ -618,7 +659,9 @@ def visualize_LBs(exact_energies, Ritz_energies, K_evals, epsilon):
     plt.show()
 
 if __name__ == "__main__":
-    test = MultStateBounds(np.array([[1, 1], [1, 1/2]]), np.array([0.4, 0.35]), np.array([0.8, 0.6]))
-    lb_list, ub_list = test.solve()
-    print("Lower bounds: ", lb_list)
-    print("Upper bounds: ", ub_list)
+    unscaled_energies = [-5,-4,-3,-2,-1,0]
+    bound_extension = 0.1
+    target_indices = [1,2,3]
+    dense_info = (None, None)
+    new_bound_pairs, incl_endpoints, nonzero_b_indices = process_bound_pairs(gen_bound_pairs(unscaled_energies, bound_extension), target_indices, dense_info)
+    print("Test ended.")
