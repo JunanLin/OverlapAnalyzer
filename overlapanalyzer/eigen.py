@@ -13,7 +13,7 @@ from openfermion import (
     jw_sz_restrict_operator
 )
 from overlapanalyzer.read_ham import *
-from overlapanalyzer.utils import exp_val_higher_moment, save_dict
+from overlapanalyzer.utils import exp_val_higher_moment, save_dict, index_to_occupied
 import csv 
 
 def save_filtered_results_to_csv(exact_energies_no_degen, overlaps, filename, threshold):
@@ -47,106 +47,106 @@ def truncate_by_ovlp_threshold(vector, overlaps, threshold):
     truncated_overlaps = [o for o in overlaps if o >= threshold]
     return truncated_vector, truncated_overlaps
 
-def calc_eigen(fileDir, spin, num_eigs=10, use_eigsh=False, **kwargs):
+def calc_eigen(fileDir, mol_name, geometry, spin, num_eigs=10, use_eigsh=False, hf_energy=None, **kwargs):
     # for spin in  ('s0', 't1'):
+    if 'create_CAS' in kwargs.keys() and kwargs['create_CAS']:
+        n_elec, n_spin_orb = load_mol_info(os.path.join(fileDir,'CAS_info.csv'))
+        mol_name = mol_name+'CAS'
+    else:
+        n_elec, n_spin_orb = load_mol_info(os.path.join(fileDir,'info.csv'))
+
+    # original_hams = find_files(os.path.join(fileDir,'ham_fer'), f"{spin}.data") # list of filenames ending with ".data"
+
+
+    # for i, filename in enumerate(original_hams):
+    filepath = os.path.join(fileDir,'ham_fer')
+    filename = f'{mol_name}_{geometry}_{n_elec}_{n_spin_orb}_{spin}.data'
+    print("Calculating eigenstates for: ", filename)
+    H_loaded = load_operator(data_directory=filepath, file_name=filename, plain_text=True)
+    print("Hamiltonian loaded.")
+    # r = geometry[i]
+    # H_sparse = get_number_preserving_sparse_operator(H_loaded, n_spin_orb, n_elec)
+    H_sparse = get_sparse_operator(H_loaded)
+    # H_sparse = jw_sz_restrict_operator(H_sparse, sz, n_electrons=n_elec, n_qubits=n_spin_orb)
+    H_sparse = jw_number_restrict_operator(H_sparse, n_elec, n_qubits=n_spin_orb)
+    print("Hamiltonian converted to sparse.")
+    if use_eigsh:
+        print(f"Calculating the first {num_eigs} eigenvalues using eigsh...")
+        emax, _ = eigsh(H_sparse, k=1, which='LA')
+        w, v = eigsh(H_sparse, k=num_eigs, which='SA')
+        w_sorted, v_sorted = sort_eigen(w, v)
+        e0 = w_sorted[0]
+    else:
+        print("Calculating all eigenvalues using eigh, this may take a while...")
+        H_dense = H_sparse.todense()
+        w, v = np.linalg.eigh(H_dense)
+        v = np.array(v)
+        w_sorted, v_sorted = sort_eigen(w, v)
+        e0 = w_sorted[0]
+        emax = w_sorted[-1]
     
-    n_elec, n_spin_orb = load_mol_info(os.path.join(fileDir,'info.csv'))
-    # if spin == 's0':
-    #     # occ_list = hf_occupation_list(n_elec, 0)
-    #     hf_state = jw_configuration_state([i for i in range(n_elec)], n_spin_orb)
-    # elif spin == 't1':
-    #     hf_state = jw_configuration_state([i for i in range(n_elec-1)] + [n_elec], n_spin_orb)
+    symmetries = get_exp_val_symmetries(v_sorted, n_spin_orb, n_elec=n_elec)
+    # evals_filtered = filter_evals_by_symmetry(w_sorted, symmetries, nelec=n_elec)
 
+    degens = count_degeneracies(w_sorted)
+    w_no_degen = non_degenerate_values(w_sorted, degens)
+    # Orthonormalize the eigenvectors within each degenerate subspace
+    v_ON = orthonormalize(v_sorted, degens)
+    print("Eigenstates computed.")
+    if 'target_state' in kwargs.keys():
+        state = kwargs.get('target_state')
+    else: 
+        if spin == 's0':
+            # occ_list = hf_occupation_list(n_elec, 0)
+            hf_state_full = jw_configuration_state([i for i in range(n_elec)], n_spin_orb)
+        elif spin == 't1':
+            hf_state_full = jw_configuration_state([i for i in range(n_elec-1)] + [n_elec], n_spin_orb)
+        elif spin == 's1':
+            hf_state_full = 1/np.sqrt(2)*(jw_configuration_state([i for i in range(n_elec-1)] + [n_elec+1], n_spin_orb) + jw_configuration_state([i for i in range(n_elec-2)] + [n_elec-1, n_elec], n_spin_orb))
+        hf_state_full = np.expand_dims(hf_state_full, axis=1)
+        state = jw_number_restrict_state(hf_state_full, n_elec, n_qubits=n_spin_orb)
 
-    original_hams = find_files(os.path.join(fileDir,'ham_fer'), f"{spin}.data") # list of filenames ending with ".data"
-
-
-    for i, filename in enumerate(original_hams):
-        print("Calculating eigenstates for: ", filename)
-        H_loaded = load_operator(data_directory=os.path.join(fileDir,'ham_fer'), file_name=filename, plain_text=True)
-        print("Hamiltonian loaded.")
-        # r = geometry[i]
-        # H_sparse = get_number_preserving_sparse_operator(H_loaded, n_spin_orb, n_elec)
-        H_sparse = get_sparse_operator(H_loaded)
-        # H_sparse = jw_sz_restrict_operator(H_sparse, sz, n_electrons=n_elec, n_qubits=n_spin_orb)
-        H_sparse = jw_number_restrict_operator(H_sparse, n_elec, n_qubits=n_spin_orb)
-        print("Hamiltonian converted to sparse.")
-        if use_eigsh:
-            print(f"Calculating the first {num_eigs} eigenvalues using eigsh...")
-            emax, _ = eigsh(H_sparse, k=1, which='LA')
-            w, v = eigsh(H_sparse, k=num_eigs, which='SA')
-            w_sorted, v_sorted = sort_eigen(w, v)
-            e0 = w_sorted[0]
-        else:
-            print("Calculating all eigenvalues using eigh, this may take a while...")
-            H_dense = H_sparse.todense()
-            w, v = np.linalg.eigh(H_dense)
-            v = np.array(v)
-            w_sorted, v_sorted = sort_eigen(w, v)
-            e0 = w_sorted[0]
-            emax = w_sorted[-1]
-        
-        symmetries = get_exp_val_symmetries(v_sorted, n_spin_orb, n_elec=n_elec)
-        # evals_filtered = filter_evals_by_symmetry(w_sorted, symmetries, nelec=n_elec)
-
-        degens = count_degeneracies(w_sorted)
-        w_no_degen = non_degenerate_values(w_sorted, degens)
-        # Orthonormalize the eigenvectors within each degenerate subspace
-        v_ON = orthonormalize(v_sorted, degens)
-        print("Eigenstates computed.")
-        if 'target_state' in kwargs.keys:
-            state = kwargs.get('target_state')
-        else: 
-            if spin == 's0':
-                # occ_list = hf_occupation_list(n_elec, 0)
-                hf_state_full = jw_configuration_state([i for i in range(n_elec)], n_spin_orb)
-            elif spin == 't1':
-                hf_state_full = jw_configuration_state([i for i in range(n_elec-1)] + [n_elec], n_spin_orb)
-            elif spin == 's1':
-                hf_state_full = 1/np.sqrt(2)*(jw_configuration_state([i for i in range(n_elec-1)] + [n_elec+1], n_spin_orb) - jw_configuration_state([i for i in range(n_elec-2)] + [n_elec-1, n_elec], n_spin_orb))
-            hf_state_full = np.expand_dims(hf_state_full, axis=1)
-            state = jw_number_restrict_state(hf_state_full, n_elec, n_qubits=n_spin_orb)
-
-        moments = exp_val_higher_moment(H_sparse, state, 40, return_all=True)
-        moments_shifted = exp_val_higher_moment(H_sparse - moments[1]*identity(H_sparse.shape[0]), state, 40, return_all=True)
-        (rescale_lower, rescale_upper) = kwargs.get('rescale_values') if kwargs.get('rescale_values') is not None else (emax, e0)
-        moments_rescaled = exp_val_higher_moment((2*H_sparse - (rescale_upper+rescale_lower)*identity(H_sparse.shape[0]))/(rescale_upper-rescale_lower), state, 40, return_all=True)
-        overlaps = overlap_with_vectors(state, v_ON, degens)
-        threshold=kwargs.get('threshold', 0.0)
-        leading_indices_and_gaps = compute_gaps(w_no_degen, overlaps, threshold=threshold)
-        print("Exact HF overlap computed.")
-        truncated_evals, truncated_overlaps = truncate_by_ovlp_threshold(w_no_degen, overlaps, threshold)
-        multiplicity_list_large_ovlps = [degens[i] for i in range(len(degens)) if overlaps[i] > 1e-9]
-        print("Multiplicities of significant overlaps: ", multiplicity_list_large_ovlps)
-        print("Symmetry expectation values of of initial state: ", get_exp_val_symmetries(state, n_spin_orb, n_elec=n_elec))
-        # print("Largest overlap and position: ", (overlaps_with_lowest[np.argmax(overlaps_with_lowest)], np.argmax(overlaps_with_lowest)))
-        ensure_directory_exists(os.path.join(fileDir, 'eigen'))
-        # save_operator(myiQCC.ham,file_name=filename, data_directory=dir+'/ham_dressed', allow_overwrite=True, plain_text=True)
-        # quick_save({"Energy": myiQCC.energies_state_specific, "num_iterations": num_iterations, "num_generators": num_generators}, name=filename[:-5] + ".pkl", path=dir+'/ham_dressed')
-        saving_dict = prepare_dict_to_save(exact_energies = w_sorted.tolist(),
-                                        exact_energies_no_degen = w_no_degen.tolist(),
-                                        exact_energies_truncated = truncated_evals,
-                                        exact_energy_max = emax[0] if use_eigsh else emax,
-                                        degen = degens.tolist(),
-                                        eigen_states = v_ON,
-                                        overlaps = overlaps,
-                                        overlaps_truncated = truncated_overlaps,
-                                        leading_indices_and_gaps = leading_indices_and_gaps,
-                                        overlap_threshold = threshold,
-                                        moments = moments.tolist(),
-                                        moments_shifted = moments_shifted.tolist(),
-                                        moments_rescaled = moments_rescaled.tolist(),
-                                        rescale_values = (rescale_lower, rescale_upper),
-                                        symmetries = symmetries,
-                                        molecule=filename[:-5])
-        tail_txt = '_CustomScale' if kwargs.get('rescale_values') is not None else ''
-        save_dict(saving_dict, os.path.join(fileDir, 'eigen'), filename[:-5] + "_eigen" + tail_txt)
-        save_filtered_results_to_csv(w_no_degen, np.array(overlaps), os.path.join(fileDir, 'eigen', filename[:-5] + "_filtered.csv"), threshold)
-        # with open(os.path.join(fileDir, 'eigen', filename[:-5] + "_eigen.pkl"), 'wb') as f:
-        #     pickle.dump(saving_dict, f)
-        # saving_dict.pop('eigen_states')
-        # with open(os.path.join(fileDir, 'eigen', filename[:-5] + "_eigen.json"), 'w') as f:
-        #     json.dump(saving_dict, f)
+    moments = exp_val_higher_moment(H_sparse, state, 40, return_all=True)
+    moments_shifted = exp_val_higher_moment(H_sparse - moments[1]*identity(H_sparse.shape[0]), state, 40, return_all=True)
+    (rescale_lower, rescale_upper) = kwargs.get('rescale_values') if kwargs.get('rescale_values') is not None else (emax, e0)
+    moments_rescaled = exp_val_higher_moment((2*H_sparse - (rescale_upper+rescale_lower)*identity(H_sparse.shape[0]))/(rescale_upper-rescale_lower), state, 40, return_all=True)
+    overlaps = overlap_with_vectors(state, v_ON, degens)
+    threshold=kwargs.get('threshold', 0.0)
+    leading_indices_and_gaps = compute_gaps(w_no_degen, overlaps, threshold=threshold)
+    print("Exact HF overlap computed.")
+    truncated_evals, truncated_overlaps = truncate_by_ovlp_threshold(w_no_degen, overlaps, threshold)
+    multiplicity_list_large_ovlps = [degens[i] for i in range(len(degens)) if overlaps[i] > 1e-9]
+    print("Multiplicities of significant overlaps: ", multiplicity_list_large_ovlps)
+    print("Symmetry expectation values of of initial state: ", get_exp_val_symmetries(state, n_spin_orb, n_elec=n_elec))
+    # print("Largest overlap and position: ", (overlaps_with_lowest[np.argmax(overlaps_with_lowest)], np.argmax(overlaps_with_lowest)))
+    ensure_directory_exists(os.path.join(fileDir, 'eigen'))
+    # save_operator(myiQCC.ham,file_name=filename, data_directory=dir+'/ham_dressed', allow_overwrite=True, plain_text=True)
+    # quick_save({"Energy": myiQCC.energies_state_specific, "num_iterations": num_iterations, "num_generators": num_generators}, name=filename[:-5] + ".pkl", path=dir+'/ham_dressed')
+    saving_dict = prepare_dict_to_save(hf_energy = hf_energy,
+                                       exact_energies = w_sorted.tolist(),
+                                    exact_energies_no_degen = w_no_degen.tolist(),
+                                    exact_energies_truncated = truncated_evals,
+                                    exact_energy_max = emax[0] if use_eigsh else emax,
+                                    degen = degens.tolist(),
+                                    eigen_states = v_ON,
+                                    overlaps = overlaps,
+                                    overlaps_truncated = truncated_overlaps,
+                                    leading_indices_and_gaps = leading_indices_and_gaps,
+                                    overlap_threshold = threshold,
+                                    moments = moments.tolist(),
+                                    moments_shifted = moments_shifted.tolist(),
+                                    moments_rescaled = moments_rescaled.tolist(),
+                                    rescale_values = (rescale_lower, rescale_upper),
+                                    symmetries = symmetries,
+                                    molecule=filename[:-5])
+    tail_txt = '_CustomScale' if kwargs.get('rescale_values') is not None else ''
+    save_dict(saving_dict, os.path.join(fileDir, 'eigen'), filename[:-5] + "_eigen" + tail_txt, save_pkl=kwargs.get('save_pkl', False))
+    save_filtered_results_to_csv(w_no_degen, np.array(overlaps), os.path.join(fileDir, 'eigen', filename[:-5] + "_filtered.csv"), threshold)
+    # with open(os.path.join(fileDir, 'eigen', filename[:-5] + "_eigen.pkl"), 'wb') as f:
+    #     pickle.dump(saving_dict, f)
+    # saving_dict.pop('eigen_states')
+    # with open(os.path.join(fileDir, 'eigen', filename[:-5] + "_eigen.json"), 'w') as f:
+    #     json.dump(saving_dict, f)
     
 def get_exp_val_symmetries(v, n_spin_orb, n_elec=None, calc_sz=True, calc_n=True, calc_s2=True):
     """
