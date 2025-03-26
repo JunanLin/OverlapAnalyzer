@@ -23,4 +23,5 @@ python setup-julia.py
 
 Usage
 -----
-To be completed.
+Calculating wavefunction overlaps with Hamiltonian eigenstates from Hamiltonian power expectation values.
+arXiv: https://arxiv.org/abs/2503.12224
