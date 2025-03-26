@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
 import numpy as np
 from openfermion.linalg import get_sparse_operator
@@ -8,7 +9,7 @@ from openfermion import load_operator
 from scipy.sparse import diags
 from scipy.sparse import csr_matrix, csc_matrix
 from overlapanalyzer.read_ham import find_files, quick_load
-from overlapanalyzer.polynomial_estimates import chebval, E_to_x, an_list
+from overlapanalyzer.polynomial_estimates import chebval, an_list
 
 plt.rcParams.update({
     "text.usetex": True,
@@ -126,70 +127,100 @@ def plot_PolyDeg_vs_LB_multi(data):
     ax1.legend(legend_elements, ['Lower Bound', r'$P_{exact}$', 'Eckart Bound'])
     plt.show()
 
-def plot_Bounds_vs_PolyDeg_Multi_new(data_dict_list, exactCons_data_dict_list, MaxDegree_list):
+def plot_Bounds_vs_PolyDeg_w_inset(data_dict_list, exactCons_data_dict_list, MaxDegree_list):
     # Font size variables
     label_fontsize = 18
     molecule_fontsize = 18
     label_padding = 3  # Padding for y-axis labels
 
-    fig, axs = plt.subplots(len(data_dict_list), 2, figsize=(12, 8), sharex=True, sharey=True)
+    fig, axs = plt.subplots(len(data_dict_list), 2, figsize=(9, 6))
 
-    # Increase spacing between subplots
-    fig.subplots_adjust(wspace=0.4)  # Adjust horizontal spacing
+    # Increase spacing between subplots and reserve space for the legend on the right
+    fig.subplots_adjust(wspace=0.4, right=0.78)  
 
     # Molecule names for labeling subplots
     molecule_names = [r'H$_4$', r'H$_4$', r'H$_2$O', r'H$_2$O']
 
+    lines = []
+    labels = []
+
     for row, data_dict in enumerate(data_dict_list):
         exactCons_data_dict = exactCons_data_dict_list[row]
         
-        for key in [0, 1]:
-            max_deg = MaxDegree_list[row][key]
+        for col in [0, 1]:
+            max_deg = MaxDegree_list[row][col]
             x_data = np.array([i for i in range(1, max_deg)])
-            axs[row, key].xaxis.set_major_locator(MaxNLocator(integer=True))
+            axs[row, col].xaxis.set_major_locator(MaxNLocator(integer=True))
 
             # Plot red markers (eigenvalue bounds)
-            data1 = np.array(data_dict[str(key)]['Overlap_LBs'][:max_deg-1])
+            data1 = np.array(data_dict[str(col)]['Overlap_LBs'][:max_deg-1])
             mask = ~np.isnan(data1) 
-            axs[row, key].plot(x_data[mask], data1[mask], marker='.', linestyle=':', label='Lower Bound (Approx.)', color='red')
-            data2 = np.array(data_dict[str(key)]['Overlap_UBs'][:max_deg-1])
+            line1, = axs[row, col].plot(x_data[mask], data1[mask], marker='.', linestyle=':', label='Lower Bound (Approx.)', color='red')
+            data2 = np.array(data_dict[str(col)]['Overlap_UBs'][:max_deg-1])
             mask = ~np.isnan(data2) 
-            axs[row, key].plot(x_data[mask], data2[mask], marker='v', linestyle=':', label='Upper Bound (Approx.)', color='red')
+            line2, = axs[row, col].plot(x_data[mask], data2[mask], marker='^', linestyle='--', label='Upper Bound (Approx.)', color='red')
 
             # Plot green markers (exact eigenvalues as constraints)
-            data3 = np.array(exactCons_data_dict[str(key)]['Overlap_LBs'][:max_deg-1])
+            data3 = np.array(exactCons_data_dict[str(col)]['Overlap_LBs'][:max_deg-1])
             mask = ~np.isnan(data3)
-            axs[row, key].plot(x_data[mask], data3[mask], marker='.', linestyle=':', label='Lower Bound (Exact)', color='green')
-            data4 = np.array(exactCons_data_dict[str(key)]['Overlap_UBs'][:max_deg-1])
+            line3, = axs[row, col].plot(x_data[mask], data3[mask], marker='.', linestyle=':', label='Lower Bound (Exact)', color='green')
+            data4 = np.array(exactCons_data_dict[str(col)]['Overlap_UBs'][:max_deg-1])
             mask = ~np.isnan(data4)
-            axs[row, key].plot(x_data[mask], data4[mask], marker='v', linestyle=':', label='Upper Bound (Exact)', color='green')
+            line4, = axs[row, col].plot(x_data[mask], data4[mask], marker='^', linestyle='--', label='Upper Bound (Exact)', color='green')
 
             # Plot blue horizontal line (exact overlap)
-            axs[row, key].axhline(y=data_dict[str(key)]['exact_ovlp'], linestyle='-', label='Exact Overlap', color='blue')
+            line5 = axs[row, col].axhline(y=data_dict[str(col)]['exact_ovlp'], linestyle='-', label='Exact Overlap', color='blue')
 
             # Set subplot limits
-            axs[row, key].set_ylim(-0.05, 1.0)
-            axs[row, key].set_yticks([0.0, 0.5, 1.0])
-
-            # Adjust x-axis limits
-            if key == 0:  # Left plots
-                axs[row, key].set_xlim(0, 21)
-            else:  # Right plots
-                axs[row, key].set_xlim(0, max_deg)
+            axs[row, col].set_ylim(-0.05, 1.0)
+            axs[row, col].set_yticks([0.0, 0.5, 1.0])
+            axs[row, col].set_xlim(0, max_deg)
 
             # Add molecule label to top right corner
-            axs[row, key].text(
-                0.95, 0.95, molecule_names[row * 2 + key],
-                transform=axs[row, key].transAxes,
+            axs[row, col].text(
+                0.95, 0.95, molecule_names[row * 2 + col],
+                transform=axs[row, col].transAxes,
                 fontsize=molecule_fontsize,
                 verticalalignment='top', horizontalalignment='right'
             )
+
+            # Collect legend handles and labels only once
+            if row == 0 and col == 1:  # Legend belongs to the top-right plot
+                lines.extend([line1, line2, line3, line4, line5])
+                labels.extend([line.get_label() for line in lines])
+
+            # Add insets for the right-side plots
+            if col == 1:
+                inset = inset_axes(axs[row, col], width="40%", height="35%", loc="lower right", bbox_to_anchor=(0.0, 0.35,1,1), bbox_transform=axs[row, col].transAxes)
+                inset.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+                # Select the inset x-axis range
+                inset_x_min = 5 if row == 0 else 6  # H_4: 5-15, H_2O: 6-24
+                inset_x_max = 20 if row == 0 else 21
+                # Reduce number of x-axis ticks
+                inset.xaxis.set_major_locator(MaxNLocator(nbins=2))  # Adjust the number of ticks
+
+                inset_x_data = np.array([i for i in range(inset_x_min, inset_x_max)])
+                
+                # Re-plot data in the inset within the selected range
+                inset.plot(inset_x_data, data1[inset_x_min-1:inset_x_max-1], marker='.', linestyle=':', color='red')
+                inset.plot(inset_x_data, data2[inset_x_min-1:inset_x_max-1], marker='^', linestyle='--', color='red')
+                inset.plot(inset_x_data, data3[inset_x_min-1:inset_x_max-1], marker='.', linestyle=':', color='green')
+                inset.plot(inset_x_data, data4[inset_x_min-1:inset_x_max-1], marker='^', linestyle='--', color='green')
+                inset.axhline(y=data_dict[str(col)]['exact_ovlp'], linestyle='-', color='blue')
+
+                # Adjust y-limits for better visibility
+                inset.set_xlim(inset_x_min, inset_x_max)
+                if row == 0:
+                    inset.set_ylim(-0.01, 0.05)
+                else:
+                    inset.set_ylim(-0.02, 0.15)
 
     # Y-axis labels with increased padding
     axs[0, 0].set_ylabel(r'$P_0$', fontsize=label_fontsize, labelpad=label_padding)
     axs[1, 0].set_ylabel(r'$P_0$', fontsize=label_fontsize, labelpad=label_padding)
     axs[0, 1].set_ylabel(r'$P_1$', fontsize=label_fontsize, labelpad=label_padding)
-    axs[1, 1].set_ylabel(r'$P_1$', fontsize=label_fontsize, labelpad=label_padding)
+    axs[1, 1].set_ylabel(r'$P_1+P_2$', fontsize=label_fontsize, labelpad=label_padding)
 
     # X-axis labels
     axs[1, 0].set_xlabel('Polynomial Degree', fontsize=label_fontsize)
@@ -199,14 +230,14 @@ def plot_Bounds_vs_PolyDeg_Multi_new(data_dict_list, exactCons_data_dict_list, M
     for ax in axs.flat:
         ax.tick_params(axis='y', which='both', labelleft=True)
 
-    # Place legend in the top-right subplot
-    axs[0, 1].legend(loc='best', fontsize=10)
+    # Place legend to the right of the top-right plot
+    axs[0, 1].legend(lines, labels, loc='upper left', fontsize=10, bbox_to_anchor=(1.05, 1.0))
 
-    plt.tight_layout(rect=[0.05, 0.05, 1, 0.95])
+    plt.tight_layout(pad=1.02)
     plt.show()
 
 
-def plot_Bounds_vs_PolyDeg(data, molname):
+def plot_Bounds_vs_PolyDeg(data):
     for i, key in enumerate(data.keys()):
         if data[key]['Eckart'] > 0:
             x_data = np.array([i for i in range(1, len(data[key]['Overlap_LBs'])+1)])
