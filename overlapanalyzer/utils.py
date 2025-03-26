@@ -11,6 +11,22 @@ import scipy.optimize as optimize
 import scipy.sparse.linalg as linalg
 from scipy.sparse.linalg import gmres, bicgstab, spsolve, norm, inv, spilu, LinearOperator
 from overlapanalyzer.contour_integration import numerical_contour_integration
+from itertools import combinations
+
+def index_to_occupied(n_elec, n_spin_orb, index):
+    """
+    Given the number of electrons, number of spin orbitals, and an index,
+    return the list of occupied orbitals corresponding to that index.
+    Example usage:
+    n_elec = 4
+    n_spin_orb = 8
+    index = 55
+    print(index_to_occupied(n_elec, n_spin_orb, index)) # Prints 
+    """
+    # Generate all possible occupation lists in lexicographical order
+    all_occupations = list(combinations(range(n_spin_orb-1,-1,-1), n_elec))
+    # Return the occupation corresponding to the given index
+    return list(all_occupations[index])
 
 def save_dict(saving_dict, fileDir, filename, save_pkl=False):
     '''
@@ -236,6 +252,13 @@ def exp_val_higher_moment(H, v, k, return_all=True):
             vk = H @ vk
             moments.append(np.vdot(v, vk))
         return moments if return_all else moments[-1]
+
+def moments_from_ovlp_and_evals(ovlps, evals, n):
+    '''
+    Calculates all moments of an operator up to degree n, given the overlaps P_i with the eigenvectors and the eigenvalues E_i.
+    Formula: <v|H^n|v> = sum_{i=1}^{N} P_i * E_i^n
+    '''
+    return [np.sum(ovlps * evals ** i, axis=0) for i in range(n+1)]
 
 def exp_val(H, eig):
     '''Calculates expectation value of <eig|H|eig>.'''
