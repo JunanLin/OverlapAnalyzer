@@ -18,8 +18,10 @@ import matplotlib.pyplot as plt
 from overlapanalyzer.utils import exp_val_higher_moment
 from overlapanalyzer.contour_integration import getContourDataFromEndPoints
 from overlapanalyzer.alg_LinearOp import linear_solver
-from overlapanalyzer.eigen import non_degenerate_values, select_right_multiplicity, truncate_by_ovlp_threshold
+# from overlapanalyzer.eigen import non_degenerate_values, select_right_multiplicity, truncate_by_ovlp_threshold
 from overlapanalyzer.polynomial_estimates import rescale_E
+from scipy.special import comb
+from numpy.polynomial import Chebyshev as Cheb, Polynomial as Poly
 
 def f_piecewise(x, x0, x1):
     return np.piecewise(x, 
@@ -411,6 +413,107 @@ class PB_linprog_params_from_eig:
             full_b = gen_b_ub_from_length(self.target_indices, b_list, len(self.unscaled_energies))
             return np.dot(self.exact_overlaps, full_b)
 
+def _build_binomial_transformation(E_max, E_min, N):
+    """
+    Build the binomial transformation matrix T such that:
+        tilde_mu = T @ mu
+    where:
+        tilde_mu_n = <((2H - (E_max + E_min)I)/(E_max - E_min))^n>
+        mu_k = <H^k>
+
+    Parameters:
+        E_max (float): Maximum eigenvalue of H
+        E_min (float): Minimum eigenvalue of H
+        N (int): Maximum moment index
+
+    Returns:
+        T (ndarray): (N+1)x(N+1) transformation matrix
+    """
+    a = E_max + E_min
+    b = E_max - E_min
+    T = np.zeros((N+1, N+1))
+    for n in range(N+1):
+        for k in range(n+1):
+            T[n, k] = comb(n, k) * (2 ** k) * ((-a) ** (n - k)) / (b ** n)
+    return T
+
+def rescale_moments(original_moments, E_max, E_min) -> list:
+    """
+    Rescale the moments of H to moments of (2H - aI)/b,
+    where a = E_max + E_min and b = E_max - E_min.
+
+    Parameters:
+        original_moments (array-like): Moments [<H^0>, ..., <H^N>]
+        E_max (float): Maximum eigenvalue of H
+        E_min (float): Minimum eigenvalue of H
+
+    Returns:
+        rescaled_moments (ndarray): [<tilde{H}^0>, ..., <tilde{H}^N>]
+    """
+    original_moments = np.asarray(original_moments)
+    N = len(original_moments) - 1
+    T = _build_binomial_transformation(E_max, E_min, N)
+    return (T @ original_moments).tolist()
+
+def rescale_number(num, E_max, E_min) -> float:
+    """
+    Rescale a number to the new scale defined by E_max and E_min.
+
+    Parameters:
+        num (float): The number to rescale.
+        E_max (float): Maximum eigenvalue of H.
+        E_min (float): Minimum eigenvalue of H.
+
+    Returns:
+        float: The rescaled number.
+    """
+    a = E_max + E_min
+    b = E_max - E_min
+    return (2 * num - a) / b
+
+def PBinputs_from_eig_agnostic_recipe(recipe: dict, rescale=True, use_cheb=False):
+    """
+    Prepare the parameters for linprog in eigenvalue-agnostic mode.
+    :param recipe: a dictionary with the following entries:
+    - moments: list of moments.
+    - intervals: a list of 4-tuples (lower_bound, upper_bound, b_value, num_points) defining the intervals.
+    : param use_rescaled: boolean indicating whether to rescale moments and intervals.
+    : param use_cheb: boolean indicating whether to use Chebyshev polynomials as basis functions.
+    (20250717: use_cheb=True is causing issues when interval is not between [-1,1]. Defaulting to False.)
+    """
+    intervals = recipe.get("intervals", [])
+    if rescale:
+        # Only works for num_intervals=2 at this point
+        if len(intervals) != 2:
+            raise ValueError("Rescaling only works for two intervals at the moment.")
+        E_lb = intervals[0][0]
+        E_ub = intervals[1][1]
+        rescaled_endpoints = [rescale_number(intervals[0][1], E_ub, E_lb),
+                              rescale_number(intervals[1][0], E_ub, E_lb)]
+        intervals[0][0] = -1
+        intervals[0][1] = rescaled_endpoints[0]
+        intervals[1][0] = rescaled_endpoints[1]
+        intervals[1][1] = 1
+    # Generate constraint_pts and b_ub together
+    pts_and_b = [
+        (np.linspace(low, up, num_points, endpoint=incl), np.full(num_points, b), num_points)
+        for (low, up, b, num_points, incl) in intervals
+    ]
+    constraint_pts = np.concatenate([x for x, _, _ in pts_and_b])
+    b_ub = np.concatenate([y for _, y, _ in pts_and_b])
+    num_x_points = [n for _, _, n in pts_and_b]
+
+    moments = recipe.get("moments", [])
+    if rescale:
+        moments = rescale_moments(moments, E_ub, E_lb)
+    if use_cheb:
+        moments = chebyshev_matrix_from_degree(len(moments) - 1) @ moments
+
+
+    # A_ub is constructed from the constraint points
+    A_ub = np.polynomial.chebyshev.chebvander(constraint_pts, len(moments) - 1) if use_cheb else np.vander(constraint_pts, len(moments), increasing=True)
+    return moments, constraint_pts, b_ub, A_ub, num_x_points, (E_lb, E_ub) if rescale else (None, None)
+
 class PolyBounds_new():
     """
     Obtaining lower and upper bounds on the overlap using polynomial majorisation/minorisation.
@@ -421,7 +524,7 @@ class PolyBounds_new():
     :param P_exact: exact overlap value
     """
     def __init__(self, values, A_ub, b_ub, constraint_pts, P_exact=None):
-        self.values = values
+        self.values = np.array(values)
         self.A_ub = A_ub
         self.b_ub = b_ub
         self.constraint_pts = constraint_pts
@@ -515,7 +618,220 @@ class PolyBounds_new():
         # plt.grid(True)
         plt.show()
 
+# helper: turn Gram matrix into coefficients of v^T Q v
+def gram_to_coefs(Q, deg):
+    coefs = []
+    for k in range(2*deg+1):
+        expr = 0
+        for i in range(deg+1):
+            j = k-i
+            if 0 <= j <= deg:
+                expr += Q[i,j]
+        coefs.append(expr)
+    return coefs
+def poly_to_str(coeffs, var="x"):
+    terms = []
+    for i, c in enumerate(coeffs):
+        if c != 0:
+            terms.append(f"({c})*{var}^{i}")
+    return " + ".join(terms) if terms else "0"
+class PolyBounds_SIP:
+    """
+    Semi-Infinite Programming approaches for polynomial bounds:
+    - Exchange method (adaptive LP)
+    - SOS/SDP method (via cvxpy)
+    """
 
+    def __init__(self, values, poly_degree=None, P_exact=None):
+        self.values = np.array(values)
+        self.poly_degree = poly_degree if poly_degree is not None else len(values)-1
+        self.bounds = []
+        self.method_used = None
+        if P_exact is not None:
+            print("Exact overlap:", P_exact)
+
+    def optimize_exchange(self, intervals, lower_funcs, tol=1e-8, max_iter=20, method="highs"):
+        T = [Cheb.basis(k) for k in range(self.poly_degree+1)]
+        grids = [list(np.linspace(a,b,3)) for (a,b) in intervals]
+
+        for it in range(max_iter):
+            A, b = [], []
+            for j,(a,bnd) in enumerate(intervals):
+                for t in grids[j]:
+                    row = np.array([Tk(t) for Tk in T])
+                    A.append(-row)
+                    b.append(-lower_funcs[j](t))
+            A = np.asarray(A); b = np.asarray(b)
+
+            LB_res = linprog(-self.values, A_ub=A, b_ub=b, method=method)
+            UB_res = linprog(self.values, A_ub=-A, b_ub=-b, method=method)
+
+            if not LB_res.success or not UB_res.success:
+                print("Exchange LP failed at iteration", it)
+                break
+
+            self.LB_result, self.UB_result = LB_res, UB_res
+            self.bounds = [np.dot(self.values, LB_res.x),
+                           np.dot(self.values, UB_res.x)]
+            self.method_used = "exchange"
+
+            # Check violations
+            c_poly = Cheb(LB_res.x)
+            violated = False
+            for j,(a,bnd) in enumerate(intervals):
+                dr = (c_poly - Cheb.fit([a,bnd],
+                                        [lower_funcs[j](a),lower_funcs[j](bnd)],1)).deriv()
+                crits = dr.roots()
+                cand = [a,bnd] + [float(t) for t in crits if np.isreal(t) and a<=t<=bnd]
+                rvals = [c_poly(t)-lower_funcs[j](t) for t in cand]
+                if min(rvals) < -tol:
+                    tmin = cand[int(np.argmin(rvals))]
+                    grids[j].append(tmin)
+                    violated = True
+            if not violated:
+                print("Exchange method converged in", it+1, "iterations")
+                break
+
+        return self.LB_result, self.UB_result, self.bounds
+
+    def optimize_sos(self, intervals, lower_coefs_list, solver="SCS", verbose=False, global_bnd=None):
+        """
+        SOS/SDP (power basis) for piecewise polynomial constraints on intervals.
+        Two SDPs:
+        1) Minorizer p_l:  l_j(x) - p_l(x) is SOS on I_j, maximize M·c
+        2) Majorizer p_u:  p_u(x) - l_j(x) is SOS on I_j, minimize M·c
+
+        intervals: list[(a,b)]
+        lower_coefs_list: list of lists/arrays; coefficients of l_j(x) in power basis (lowest degree first)
+        """
+        import cvxpy as cp
+        n = self.poly_degree
+        M = self.values  # objective weights (must be power moments)
+
+        # build constraints for sign*(p-l) = SOS certificate
+        def interval_constraints(cvar, intervals_, Llist_, sign):
+            cons = []
+            for (a,b), lcoefs in zip(intervals_, Llist_):
+                # degree of residual r(x)
+                deg_r = max(n, len(lcoefs)-1)
+                # ensure deg_r is an int >= 0
+                deg_r = int(max(0, deg_r))
+                d0 = int(np.ceil((deg_r) / 2)) # Degree of s0
+                d1 = max(0, int(np.ceil((deg_r-2)/2))) # Degree of s1
+
+                Q0 = cp.Variable((d0+1,d0+1), PSD=True)
+                Q1 = cp.Variable((d1+1,d1+1), PSD=True)
+
+                s0 = gram_to_coefs(Q0, d0) # coefficients of s0(v) = v^T Q0 v
+                s1 = gram_to_coefs(Q1, d1) # coefficients of s1(v) = v^T Q1 v
+
+                quad = [-1.0, (a+b), -a*b] # (x-a)(b-x) = -x^2 + (a+b)x - ab
+                conv = [0]*(len(s1)+len(quad)-1) # Using polynomial convolution to compute the product (s1 * (x-a)(b-x))
+                for i in range(len(s1)):
+                    for j in range(len(quad)):
+                        conv[i+j] += s1[i]*quad[j]
+
+                # residual coefficients: sign*(p-l)
+                # build p(x) and l(x) up to degree deg_r
+                # p(x) coefficients: use cvar[0..n] and pad zeros up to deg_r
+                cp_poly = [cvar[i] if i <= n else 0 for i in range(deg_r+1)]
+                # l(x) coefficients: use provided lcoefs and pad/truncate to deg_r+1
+                lp = list(lcoefs[:deg_r+1]) + [0]*max(0, deg_r+1 - len(lcoefs))
+                # residual coefficients: sign*(p-l)
+                rcoefs = [sign*(cp_poly[k] - lp[k]) for k in range(deg_r+1)]
+
+                # pad SOS (right-hand) side to same degree as r
+                L = max(len(rcoefs), len(s0), len(conv))
+                def pad(lst): return list(lst) + [0]*(L-len(lst))
+                s0p, convp, rpad = pad(s0), pad(conv), pad(rcoefs)
+                # print("Residual polynomial r(x):", poly_to_str(rpad, "x"))
+                # print("SOS side σ0(x)+(x-a)(b-x)σ1(x):", poly_to_str(s0p, "x"), "+", poly_to_str(convp, "x"))
+
+                # enforce r(x) == SOS polynomial, coefficient by coefficient
+                for k in range(deg_r+1):
+                    cons.append(rpad[k] == s0p[k] + convp[k])
+
+                # explicitly enforce PSD on Gram matrices (some cvxpy versions
+                # require explicit semidefinite constraints even when PSD=True used)
+                try:
+                    cons.append(Q0 >> 0)
+                    cons.append(Q1 >> 0)
+                except Exception:
+                    # if the PSD=True flag already enforces it, ignore
+                    pass
+            return cons
+
+        # Global bounds on c_LB and c_UB
+
+        # --- MINORIZER ---
+        c_LB = cp.Variable(n+1)
+        cons_LB = interval_constraints(c_LB, intervals, lower_coefs_list, sign=-1)
+        if global_bnd is not None:
+            cons_LB.append(c_LB <= global_bnd)
+            cons_LB.append(-global_bnd <= c_LB)
+        prob_LB = cp.Problem(cp.Maximize(M @ c_LB), cons_LB)
+        prob_LB.solve(solver=solver, verbose=verbose)
+        LB_val = float(M @ c_LB.value) if c_LB.value is not None else None
+
+        # --- MAJORIZER ---
+        c_UB = cp.Variable(n+1)
+        cons_UB = interval_constraints(c_UB, intervals, lower_coefs_list, sign=+1)
+        if global_bnd is not None:
+            cons_UB.append(c_UB <= global_bnd)
+            cons_UB.append(c_UB >= -global_bnd)
+        prob_UB = cp.Problem(cp.Minimize(M @ c_UB), cons_UB)
+        prob_UB.solve(solver=solver, verbose=verbose)
+        UB_val = float(M @ c_UB.value) if c_UB.value is not None else None
+
+        # Store results
+        self.c_LB, self.c_UB = c_LB.value, c_UB.value
+        self.bounds = [LB_val, UB_val]
+        self.method_used = "sos"
+        self.LB_result = type("obj", (), {"x": self.c_LB})
+        self.UB_result = type("obj", (), {"x": self.c_UB})
+
+        print("SOS bounds:", self.bounds)
+        return prob_LB, prob_UB, self.bounds
+
+
+
+    def plot_results(self, intervals, lower_funcs=None, lower_coefs_list=None,
+                     n_plot_points=500, n_constraint_pts=10, linewidth=2, title=None):
+        """
+        Plot optimized polynomials and constraint functions.
+        For exchange: lower_funcs must be provided.
+        For sos: lower_coefs_list must be provided.
+        """
+        fig, ax = plt.subplots()
+
+
+        xs = np.linspace(intervals[0][0], intervals[-1][-1], n_plot_points)
+
+        if self.method_used == "exchange":
+            LB_poly = Cheb(self.LB_result.x)
+            UB_poly = Cheb(self.UB_result.x)
+            ax.plot(xs, LB_poly(xs), label="Minorizing poly (LB)", color="blue", lw=linewidth)
+            ax.plot(xs, UB_poly(xs), label="Majorizing poly (UB)", color="green", lw=linewidth)
+            if lower_funcs is not None:
+                ax.plot(xs, lower_funcs[0](xs), "--", color="red", lw=linewidth, label="Constraint f(x)")
+
+        elif self.method_used == "sos":
+            # Power-basis polynomials from SOS
+            LB_poly = Poly(self.c_LB)
+            UB_poly = Poly(self.c_UB)
+            ax.plot(xs, LB_poly(xs), label="SOS Minorizing poly (LB)", lw=linewidth, color="blue")
+            ax.plot(xs, UB_poly(xs), label="SOS Majorizing poly (UB)", lw=linewidth, color="green")
+            # Plot on each interval with its own constraint l_j
+            for (a,b), lcoefs in zip(intervals, lower_coefs_list or []):
+                xs_piecewise = np.linspace(a, b, n_constraint_pts)
+                f_poly = Poly(lcoefs)
+                ax.plot(xs_piecewise, f_poly(xs_piecewise), "--", lw=linewidth, color="red")
+
+        if title:
+            ax.set_title(title + f" (deg={self.poly_degree})")
+        ax.legend()
+        plt.show()
+    
 def moments_from_distr(evals, overlaps, degree):
     """
     Compute the first n moments of a Hamiltonian given its eigenvalues and overlaps.
@@ -659,9 +975,11 @@ def visualize_LBs(exact_energies, Ritz_energies, K_evals, epsilon):
     plt.show()
 
 if __name__ == "__main__":
-    unscaled_energies = [-5,-4,-3,-2,-1,0]
-    bound_extension = 0.1
-    target_indices = [1,2,3]
-    dense_info = (None, None)
-    new_bound_pairs, incl_endpoints, nonzero_b_indices = process_bound_pairs(gen_bound_pairs(unscaled_energies, bound_extension), target_indices, dense_info)
-    print("Test ended.")
+    recipe = {"moments": [1, -2, 4, 8, -16, 32],
+              "regions": [(-3, -2, 1, 10, True), (-1.95, 2, 0, 20, True)],
+              "use_cheb": True}
+    constraint_pts, b_ub, A_ub = PBinputs_from_eig_agnostic_recipe(recipe)
+    print("Constraint points:", constraint_pts)
+    print("b_ub:", b_ub)
+    print("A_ub shape:", A_ub.shape)
+    print("b_ub shape:", b_ub.shape)
