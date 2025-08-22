@@ -711,54 +711,78 @@ class PolyBounds_SIP:
         # build constraints for sign*(p-l) = SOS certificate
         def interval_constraints(cvar, intervals_, Llist_, sign):
             cons = []
-            for (a,b), lcoefs in zip(intervals_, Llist_):
+            for (a, b), lcoefs in zip(intervals_, Llist_):
                 # degree of residual r(x)
-                deg_r = max(n, len(lcoefs)-1)
-                # ensure deg_r is an int >= 0
+                deg_r = max(n, len(lcoefs) - 1)
                 deg_r = int(max(0, deg_r))
-                d0 = int(np.ceil((deg_r) / 2)) # Degree of s0
-                d1 = max(0, int(np.ceil((deg_r-2)/2))) # Degree of s1
 
-                Q0 = cp.Variable((d0+1,d0+1), PSD=True)
-                Q1 = cp.Variable((d1+1,d1+1), PSD=True)
+                if deg_r % 2 == 0:
+                    # -------- EVEN DEGREE CASE --------
+                    d0 = deg_r // 2
+                    d1 = max(0, (deg_r - 2) // 2)
 
-                s0 = gram_to_coefs(Q0, d0) # coefficients of s0(v) = v^T Q0 v
-                s1 = gram_to_coefs(Q1, d1) # coefficients of s1(v) = v^T Q1 v
+                    Q0 = cp.Variable((d0 + 1, d0 + 1), PSD=True)
+                    Q1 = cp.Variable((d1 + 1, d1 + 1), PSD=True)
 
-                quad = [-1.0, (a+b), -a*b] # (x-a)(b-x) = -x^2 + (a+b)x - ab
-                conv = [0]*(len(s1)+len(quad)-1) # Using polynomial convolution to compute the product (s1 * (x-a)(b-x))
-                for i in range(len(s1)):
-                    for j in range(len(quad)):
-                        conv[i+j] += s1[i]*quad[j]
+                    s0 = gram_to_coefs(Q0, d0)
+                    s1 = gram_to_coefs(Q1, d1)
 
-                # residual coefficients: sign*(p-l)
-                # build p(x) and l(x) up to degree deg_r
-                # p(x) coefficients: use cvar[0..n] and pad zeros up to deg_r
-                cp_poly = [cvar[i] if i <= n else 0 for i in range(deg_r+1)]
-                # l(x) coefficients: use provided lcoefs and pad/truncate to deg_r+1
-                lp = list(lcoefs[:deg_r+1]) + [0]*max(0, deg_r+1 - len(lcoefs))
-                # residual coefficients: sign*(p-l)
-                rcoefs = [sign*(cp_poly[k] - lp[k]) for k in range(deg_r+1)]
+                    # (x-a)(b-x) = -x^2 + (a+b)x - ab
+                    quad = [-a * b, (a + b), -1.0]
+                    conv = [0] * (len(s1) + len(quad) - 1)
+                    for i in range(len(s1)):
+                        for j in range(len(quad)):
+                            conv[i + j] += s1[i] * quad[j]
 
-                # pad SOS (right-hand) side to same degree as r
-                L = max(len(rcoefs), len(s0), len(conv))
-                def pad(lst): return list(lst) + [0]*(L-len(lst))
-                s0p, convp, rpad = pad(s0), pad(conv), pad(rcoefs)
-                # print("Residual polynomial r(x):", poly_to_str(rpad, "x"))
-                # print("SOS side σ0(x)+(x-a)(b-x)σ1(x):", poly_to_str(s0p, "x"), "+", poly_to_str(convp, "x"))
+                    cp_poly = [cvar[i] if i <= n else 0 for i in range(deg_r + 1)]
+                    lp = list(lcoefs[:deg_r + 1]) + [0] * max(0, deg_r + 1 - len(lcoefs))
+                    rcoefs = [sign * (cp_poly[k] - lp[k]) for k in range(deg_r + 1)]
 
-                # enforce r(x) == SOS polynomial, coefficient by coefficient
-                for k in range(deg_r+1):
-                    cons.append(rpad[k] == s0p[k] + convp[k])
+                    L = max(len(rcoefs), len(s0), len(conv))
+                    def pad(lst): return list(lst) + [0] * (L - len(lst))
+                    s0p, convp, rpad = pad(s0), pad(conv), pad(rcoefs)
 
-                # explicitly enforce PSD on Gram matrices (some cvxpy versions
-                # require explicit semidefinite constraints even when PSD=True used)
-                try:
-                    cons.append(Q0 >> 0)
-                    cons.append(Q1 >> 0)
-                except Exception:
-                    # if the PSD=True flag already enforces it, ignore
-                    pass
+                    for k in range(deg_r + 1):
+                        cons.append(rpad[k] == s0p[k] + convp[k])
+
+                    cons += [Q0 >> 0, Q1 >> 0]
+
+                else:
+                    # -------- ODD DEGREE CASE --------
+                    d_sa = (deg_r - 1) // 2
+                    d_sb = (deg_r - 1) // 2
+
+                    Qa = cp.Variable((d_sa + 1, d_sa + 1), PSD=True)
+                    Qb = cp.Variable((d_sb + 1, d_sb + 1), PSD=True)
+
+                    sa = gram_to_coefs(Qa, d_sa)
+                    sb = gram_to_coefs(Qb, d_sb)
+
+                    # (x-a) sa(x)
+                    term_a = [0] * (len(sa) + 1)
+                    for i in range(len(sa)):
+                        term_a[i] += -a * sa[i]
+                        term_a[i + 1] += sa[i]
+
+                    # (b-x) sb(x) = b*sb(x) - x*sb(x)
+                    term_b = [0] * (len(sb) + 1)
+                    for i in range(len(sb)):
+                        term_b[i] += b * sb[i]
+                        term_b[i + 1] -= sb[i]
+
+                    cp_poly = [cvar[i] if i <= n else 0 for i in range(deg_r + 1)]
+                    lp = list(lcoefs[:deg_r + 1]) + [0] * max(0, deg_r + 1 - len(lcoefs))
+                    rcoefs = [sign * (cp_poly[k] - lp[k]) for k in range(deg_r + 1)]
+
+                    L = max(len(rcoefs), len(term_a), len(term_b))
+                    def pad(lst): return list(lst) + [0] * (L - len(lst))
+                    term_ap, term_bp, rpad = pad(term_a), pad(term_b), pad(rcoefs)
+
+                    for k in range(deg_r + 1):
+                        cons.append(rpad[k] == term_ap[k] + term_bp[k])
+
+                    cons += [Qa >> 0, Qb >> 0]
+
             return cons
 
         # Global bounds on c_LB and c_UB
