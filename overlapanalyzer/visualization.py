@@ -238,56 +238,59 @@ def plot_Bounds_vs_PolyDeg_w_inset(data_dict_list, exactCons_data_dict_list, Max
 
 
 def plot_Bounds_vs_PolyDeg(data):
-    for i, key in enumerate(data.keys()):
-        if data[key]['Eckart'] > 0:
-            x_data = np.array([i for i in range(1, len(data[key]['Overlap_LBs'])+1)])
-            plt.plot(x_data, data[key]['Overlap_LBs'], marker='.', linestyle=':', label=f'Lower Bound', color='red')
-            plt.plot(x_data, data[key]['Overlap_UBs'], marker='v', linestyle=':', label='Upper Bound', color='red')
-            plt.axhline(y=data[key]['exact_Overlap'], linestyle='-', label=r' $P_{exact}$', color='blue')
-            plt.axhline(y=data[key]['Eckart'], linestyle='-.', label='Eckart Bound', color='blue')
-            plt.xticks(x_data)
-            plt.xlabel('Polynomial degree')
-            plt.ylabel('Overlap value')
-            plt.legend()
-            # plt.title(molname + f', R = {key}')
-            plt.show()
+    for key in data.keys():
+        if 'Eckart' in data[key]:
+            if data[key]['Eckart'] > 0:
+                # ...existing code for single axis...
+                x_data = np.array([i for i in range(2, len(data[key]['Overlap_LBs'])+2)])
+                plt.plot(x_data, data[key]['Overlap_LBs'], marker='.', linestyle=':', label=f'Lower Bound', color='red')
+                plt.plot(x_data, data[key]['Overlap_UBs'], marker='v', linestyle=':', label='Upper Bound', color='red')
+                if 'exact_overlap' in data[key]:
+                    plt.axhline(y=data[key]['exact_overlap'], linestyle='-', label=r' $P_{exact}$', color='blue')
+                plt.axhline(y=data[key]['Eckart'], linestyle='-.', label='Eckart Bound', color='blue')
+                plt.xticks(x_data)
+                plt.xlabel('Polynomial degree')
+                plt.ylabel('Overlap value')
+                plt.legend()
+                plt.show()
+            else:
+                # ...existing code for two axes...
+                fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, height_ratios=[4, 1])
+                fig.subplots_adjust(hspace=0.05)
+                x_data = np.array([i for i in range(2, len(data[key]['Overlap_LBs'])+2)])
+                ax1.plot(x_data, data[key]['Overlap_LBs'], marker='.', linestyle=':', color='red', label='Lower Bound')
+                ax1.plot(x_data, data[key]['Overlap_UBs'], marker='v', linestyle=':', color='red', label='Upper Bound')
+                if 'exact_overlap' in data[key]:
+                    ax1.axhline(y=data[key]['exact_overlap'], linestyle='-', color='blue', label=r'$P_{exact}$')
+                ax1.axhline(y=data[key]['Eckart'], linestyle='-.', color='blue', label='Eckart Bound')
+                ax2.axhline(y=data[key]['Eckart'], linestyle='-.', color='blue')
+                ax1.set_ylim(-0.05, 1.05)
+                ax2.set_ylim(data[key]['Eckart']-0.02, data[key]['Eckart']+0.02)
+                ax1.spines.bottom.set_visible(False)
+                ax2.spines.top.set_visible(False)
+                ax1.xaxis.tick_top()
+                ax1.tick_params(labeltop=False)
+                ax1.set_xticks([])
+                ax1.set_xticks([], minor=True)
+                ax2.xaxis.tick_bottom()
+                ax2.set_xticks(x_data)
+                ax2.set_xlabel('Polynomial degree')
+                ax1.set_ylabel('Overlap value')
+                ax1.legend()
+                plt.show()
         else:
-            fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, height_ratios=[4, 1])
-            fig.subplots_adjust(hspace=0.05)  # adjust space between Axes
-            # ax = plt.gca()
-
-
-            x_data = np.array([i for i in range(1, len(data[key]['Overlap_LBs'])+1)])
+            # ...existing code for single axis when 'Eckart' not present...
+            fig, ax1 = plt.subplots()
+            x_data = np.array([i for i in range(2, len(data[key]['Overlap_LBs'])+2)])
             ax1.plot(x_data, data[key]['Overlap_LBs'], marker='.', linestyle=':', color='red', label='Lower Bound')
             ax1.plot(x_data, data[key]['Overlap_UBs'], marker='v', linestyle=':', color='red', label='Upper Bound')
-            ax1.axhline(y=data[key]['exact_Overlap'], linestyle='-', color='blue', label=r'$P_{exact}$')
-            ax1.axhline(y=data[key]['Eckart'], linestyle='-.', color='blue', label='Eckart Bound')
-            # ax2.plot(x_data, data[key]['Overlap_LBs'], marker='.', linestyle=':', color=color)
-            # ax2.axhline(y=data[key]['exact_Overlap'], linestyle='-', color=color)
-            ax2.axhline(y=data[key]['Eckart'], linestyle='-.', color='blue')
-
-            
+            if 'exact_overlap' in data[key]:
+                ax1.axhline(y=data[key]['exact_overlap'], linestyle='-', color='blue', label=r'$P_{exact}$')
             ax1.set_ylim(-0.05, 1.05)
-            ax2.set_ylim(data[key]['Eckart']-0.02, data[key]['Eckart']+0.02)
-            # hide the spines between ax and ax2
-            ax1.spines.bottom.set_visible(False)
-            ax2.spines.top.set_visible(False)
-            ax1.xaxis.tick_top()
-            ax1.tick_params(labeltop=False)  # don't put tick labels at the top
-            ax1.set_xticks([])
-            ax1.set_xticks([], minor=True)
-            ax2.xaxis.tick_bottom()
-
-            d = .3  # proportion of vertical to horizontal extent of the slanted line
-            kwargs = dict(marker=[(-1, -d), (1, d)], markersize=12,
-                        linestyle="none", color='k', mec='k', mew=1, clip_on=False)
-            ax1.plot([0, 1], [0, 0], transform=ax1.transAxes, **kwargs)
-            ax2.plot([0, 1], [1, 1], transform=ax2.transAxes, **kwargs)
-            ax2.set_xticks(x_data)
-            ax2.set_xlabel('Polynomial degree')
+            ax1.set_xticks(x_data)
+            ax1.set_xlabel('Polynomial degree')
             ax1.set_ylabel('Overlap value')
             ax1.legend()
-            # ax1.set_title(molname + f', R = {key}')
             plt.show()
 
 def plot_Bounds_vs_PolyDeg_Multi(data_dict_list, exactCons_data_dict_list, MaxDegree_list):
