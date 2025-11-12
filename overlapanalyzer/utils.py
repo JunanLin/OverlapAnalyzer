@@ -638,6 +638,18 @@ class resolvent_estim():
         int_method = kwargs.get("int_method", self.int_method) # Integration method
         return np.real_if_close(numerical_contour_integration(resolvent, center, radius, nint, int_method) / (2 * np.pi * 1j))
 
+def rescale_number(x, a, b):
+    """
+    Rescale a number from range [a, b] to range [-1, 1].
+    """
+    return (2*x-(a+b))/(b-a)
+
+def rescale_number_back(y, a, b):
+    """
+    Returns the original value of a number rescaled using bounds (a,b).
+    """
+    return (y*(b-a)+(a+b))/2
+
 if __name__ == "__main__":
     A = [[2,3,0],[0,3,0],[2,0,1.5]]
     V = np.array([0,-1,1])
