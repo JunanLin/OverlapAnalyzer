@@ -5,7 +5,6 @@ import pandas as pd
 from numpy.polynomial import chebyshev
 from numpy.polynomial import Polynomial
 from scipy.optimize import minimize, NonlinearConstraint, linprog
-# from scipy.interpolate import interp1d
 from scipy.special import eval_chebyt
 import matplotlib.pyplot as plt
 # Uncomment for production plotting with LaTeX (slower)
@@ -18,10 +17,8 @@ import matplotlib.pyplot as plt
 from overlapanalyzer.utils import exp_val_higher_moment
 from overlapanalyzer.contour_integration import getContourDataFromEndPoints
 from overlapanalyzer.alg_LinearOp import linear_solver
-# from overlapanalyzer.eigen import non_degenerate_values, select_right_multiplicity, truncate_by_ovlp_threshold
 from overlapanalyzer.polynomial_estimates import rescale_E
 from scipy.special import comb
-from numpy.polynomial import Chebyshev as Cheb, Polynomial as Poly
 
 def f_piecewise(x, x0, x1):
     return np.piecewise(x, 
@@ -629,12 +626,6 @@ def gram_to_coefs(Q, deg):
                 expr += Q[i,j]
         coefs.append(expr)
     return coefs
-def poly_to_str(coeffs, var="x"):
-    terms = []
-    for i, c in enumerate(coeffs):
-        if c != 0:
-            terms.append(f"({c})*{var}^{i}")
-    return " + ".join(terms) if terms else "0"
 class PolyBounds_SIP:
     """
     Semi-Infinite Programming approaches for polynomial bounds:
@@ -650,51 +641,7 @@ class PolyBounds_SIP:
         if P_exact is not None:
             print("Exact overlap:", P_exact)
 
-    def optimize_exchange(self, intervals, lower_funcs, tol=1e-8, max_iter=20, method="highs"):
-        T = [Cheb.basis(k) for k in range(self.poly_degree+1)]
-        grids = [list(np.linspace(a,b,3)) for (a,b) in intervals]
-
-        for it in range(max_iter):
-            A, b = [], []
-            for j,(a,bnd) in enumerate(intervals):
-                for t in grids[j]:
-                    row = np.array([Tk(t) for Tk in T])
-                    A.append(-row)
-                    b.append(-lower_funcs[j](t))
-            A = np.asarray(A); b = np.asarray(b)
-
-            LB_res = linprog(-self.values, A_ub=A, b_ub=b, method=method)
-            UB_res = linprog(self.values, A_ub=-A, b_ub=-b, method=method)
-
-            if not LB_res.success or not UB_res.success:
-                print("Exchange LP failed at iteration", it)
-                break
-
-            self.LB_result, self.UB_result = LB_res, UB_res
-            self.bounds = [np.dot(self.values, LB_res.x),
-                           np.dot(self.values, UB_res.x)]
-            self.method_used = "exchange"
-
-            # Check violations
-            c_poly = Cheb(LB_res.x)
-            violated = False
-            for j,(a,bnd) in enumerate(intervals):
-                dr = (c_poly - Cheb.fit([a,bnd],
-                                        [lower_funcs[j](a),lower_funcs[j](bnd)],1)).deriv()
-                crits = dr.roots()
-                cand = [a,bnd] + [float(t) for t in crits if np.isreal(t) and a<=t<=bnd]
-                rvals = [c_poly(t)-lower_funcs[j](t) for t in cand]
-                if min(rvals) < -tol:
-                    tmin = cand[int(np.argmin(rvals))]
-                    grids[j].append(tmin)
-                    violated = True
-            if not violated:
-                print("Exchange method converged in", it+1, "iterations")
-                break
-
-        return self.LB_result, self.UB_result, self.bounds
-
-    def optimize_sos(self, intervals, lower_coefs_list, solver="SCS", verbose=False, global_bnd=None):
+    def optimize_sos(self, intervals, lower_coefs_list, solver="SCS", verbose=False, global_bnd=None, solver_max_iters=None):
         """
         SOS/SDP (power basis) for piecewise polynomial constraints on intervals.
         Two SDPs:
@@ -703,6 +650,8 @@ class PolyBounds_SIP:
 
         intervals: list[(a,b)]
         lower_coefs_list: list of lists/arrays; coefficients of l_j(x) in power basis (lowest degree first)
+        solver: CVXPY solver name (default "SCS")
+        solver_max_iters: optional int, forwarded to cp.Problem.solve(...) as max_iters when provided
         """
         import cvxpy as cp
         n = self.poly_degree
@@ -727,7 +676,7 @@ class PolyBounds_SIP:
                     s0 = gram_to_coefs(Q0, d0)
                     s1 = gram_to_coefs(Q1, d1)
 
-                    # (x-a)(b-x) = -x^2 + (a+b)x - ab
+                    # (x-a)(b-x) = -x^2 + (a+b)x - ab, note the reverse order in quad for convolution to work
                     quad = [-a * b, (a + b), -1.0]
                     conv = [0] * (len(s1) + len(quad) - 1)
                     for i in range(len(s1)):
@@ -785,6 +734,11 @@ class PolyBounds_SIP:
 
             return cons
 
+        # Prepare optional kwargs for Problem.solve based on caller input
+        solve_kwargs = {}
+        if solver_max_iters is not None:
+            solve_kwargs['max_iters'] = int(solver_max_iters)
+
         # Global bounds on c_LB and c_UB
 
         # --- MINORIZER ---
@@ -794,7 +748,7 @@ class PolyBounds_SIP:
             cons_LB.append(c_LB <= global_bnd)
             cons_LB.append(-global_bnd <= c_LB)
         prob_LB = cp.Problem(cp.Maximize(M @ c_LB), cons_LB)
-        prob_LB.solve(solver=solver, verbose=verbose)
+        prob_LB.solve(solver=solver, verbose=verbose, **solve_kwargs)
         LB_val = float(M @ c_LB.value) if c_LB.value is not None else None
 
         # --- MAJORIZER ---
@@ -804,7 +758,7 @@ class PolyBounds_SIP:
             cons_UB.append(c_UB <= global_bnd)
             cons_UB.append(c_UB >= -global_bnd)
         prob_UB = cp.Problem(cp.Minimize(M @ c_UB), cons_UB)
-        prob_UB.solve(solver=solver, verbose=verbose)
+        prob_UB.solve(solver=solver, verbose=verbose, **solve_kwargs)
         UB_val = float(M @ c_UB.value) if c_UB.value is not None else None
 
         # Store results
@@ -819,7 +773,7 @@ class PolyBounds_SIP:
 
 
 
-    def plot_results(self, intervals, lower_funcs=None, lower_coefs_list=None,
+    def plot_results(self, intervals, lower_coefs_list=None,
                      n_plot_points=500, n_constraint_pts=10, linewidth=2, title=None):
         """
         Plot optimized polynomials and constraint functions.
@@ -831,24 +785,16 @@ class PolyBounds_SIP:
 
         xs = np.linspace(intervals[0][0], intervals[-1][-1], n_plot_points)
 
-        if self.method_used == "exchange":
-            LB_poly = Cheb(self.LB_result.x)
-            UB_poly = Cheb(self.UB_result.x)
-            ax.plot(xs, LB_poly(xs), label="Minorizing poly (LB)", color="blue", lw=linewidth)
-            ax.plot(xs, UB_poly(xs), label="Majorizing poly (UB)", color="green", lw=linewidth)
-            if lower_funcs is not None:
-                ax.plot(xs, lower_funcs[0](xs), "--", color="red", lw=linewidth, label="Constraint f(x)")
-
-        elif self.method_used == "sos":
+        if self.method_used == "sos":
             # Power-basis polynomials from SOS
-            LB_poly = Poly(self.c_LB)
-            UB_poly = Poly(self.c_UB)
-            ax.plot(xs, LB_poly(xs), label="SOS Minorizing poly (LB)", lw=linewidth, color="blue")
-            ax.plot(xs, UB_poly(xs), label="SOS Majorizing poly (UB)", lw=linewidth, color="green")
+            LB_poly = Polynomial(self.c_LB)
+            UB_poly = Polynomial(self.c_UB)
+            ax.plot(xs, LB_poly(xs), label="Minorizing poly (LB)", lw=linewidth, color="blue")
+            ax.plot(xs, UB_poly(xs), label="Majorizing poly (UB)", lw=linewidth, color="green")
             # Plot on each interval with its own constraint l_j
             for (a,b), lcoefs in zip(intervals, lower_coefs_list or []):
                 xs_piecewise = np.linspace(a, b, n_constraint_pts)
-                f_poly = Poly(lcoefs)
+                f_poly = Polynomial(lcoefs)
                 ax.plot(xs_piecewise, f_poly(xs_piecewise), "--", lw=linewidth, color="red")
 
         if title:
@@ -856,6 +802,25 @@ class PolyBounds_SIP:
         ax.legend()
         plt.show()
     
+def intervals_from_eigen(eig_results, target_index, b_values):
+    """
+    Generate intervals and lower polynomial coefficients from eigenvalue results.
+    :param eig_results: dictionary of eigenvalue results.
+    :param target_index: index of the target state.
+    :param b_values: list of b values for the constraints. Must match the length of target_indices.
+    """
+    exact_energies = eig_results['exact_energies_no_degen']
+    if target_index < 0 or target_index >= len(exact_energies):
+        raise ValueError("target_index is out of bounds.")
+    if len(b_values) != 1:
+        raise ValueError("Currently only supporting b_values with one element.")
+    E0 = exact_energies[target_index]
+    Emax = exact_energies[-1]
+    intervals = [(exact_energies[0], E0), (E0, Emax)]
+    lower_coefs_list = []
+    for (a, b), b_val in zip(intervals, b_values):
+        lower_coefs_list.append([b_val * (b - x) / (b - a) for x in [a, b]])
+    return intervals, lower_coefs_list
 def moments_from_distr(evals, overlaps, degree):
     """
     Compute the first n moments of a Hamiltonian given its eigenvalues and overlaps.
