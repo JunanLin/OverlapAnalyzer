@@ -576,12 +576,6 @@ def residue_vector(v, basis):
     proj = projection(v, basis)
     return v - proj
 
-def Davidson_original(H, ini_guess, tol, n_max = 100):
-    """Performs original Davidson diagonalization algorithm in S. Cotton's work. UNFINISHED."""
-    b = [ini_guess]
-    sigma = []
-    for n in range(1,n_max):
-        sigma.append(np.dot(H,b[n-1]))
 
 if __name__ == '__main__':
     import numpy as np
