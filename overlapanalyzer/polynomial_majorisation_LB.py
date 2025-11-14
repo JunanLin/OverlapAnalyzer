@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import scipy as sp
 import copy
@@ -525,7 +526,9 @@ class PolyBounds_new():
         self.A_ub = A_ub
         self.b_ub = b_ub
         self.constraint_pts = constraint_pts
-        self.poly_degree = len(values) - 1
+        self.max_poly_degree = len(values) - 1
+        self.poly_degree = self.max_poly_degree
+        self.multi_degree_results = None
         if P_exact is not None:
             print("Exact overlap: ", P_exact)
     
@@ -538,30 +541,66 @@ class PolyBounds_new():
         coeffs = chebyshev.chebfit(chebyshev_nodes, y_nodes, n)
         return coeffs
     
-    def optimize(self, bound=1e20, method='highs', linprog_options={}):
-        print("Condition number for A: ", np.linalg.cond(self.A_ub))
-        self.LB_result = linprog(-self.values, A_ub=self.A_ub, b_ub=self.b_ub, bounds=(-bound, bound), method=method, options=linprog_options)
-        self.UB_result = linprog(self.values, A_ub=-self.A_ub, b_ub=-self.b_ub, bounds=(-bound, bound), method=method, options=linprog_options)
-        self.bounds = []
-        print(f"Poly degree: {self.poly_degree}")
-        for bound_name in ['LB', 'UB']:
-            result = self.LB_result if bound_name == 'LB' else self.UB_result
-            if result.success:
-                print(f"{bound_name} Optimal parameters found:")
-                print("c_i =", result.x)
-                bound = np.dot(self.values, result.x)
-                self.bounds.append(bound)
-                print(f"Overlap {bound_name}: ", bound)
-            else:
-                print(f"{bound_name} Optimization failed:", result.message)
-                self.bounds.append(np.nan)
-        
-        # Compute and store Chebyshev approximation value
-        self.chebyshev_coeffs = self.compute_chebyshev_coeffs(n=self.poly_degree)
-        self.chebyshev_approximation = np.dot(self.values, self.chebyshev_coeffs)
-        print("Chebyshev Approximation Value: ", self.chebyshev_approximation)
-        
-        return self.LB_result, self.UB_result, self.bounds
+    def optimize(self, poly_degrees=None, bound=1e20, method='highs', linprog_options=None):
+        if linprog_options is None:
+            linprog_options = {}
+        if poly_degrees is None:
+            poly_degrees = [i for i in range(3, self.poly_degree)]
+        poly_degrees = sorted({int(deg) for deg in poly_degrees})
+        if not poly_degrees:
+            raise ValueError("poly_degrees must contain at least one degree.")
+        summaries = []
+        for deg in poly_degrees:
+            if deg < 0 or deg > self.max_poly_degree:
+                raise ValueError(f"Requested poly_degree {deg} is outside [0, {self.max_poly_degree}].")
+            current_values = self.values[:deg + 1]
+            current_A = self.A_ub[:, :deg + 1]
+            # print("Condition number for A: ", np.linalg.cond(current_A))
+            LB_result = linprog(-current_values, A_ub=current_A, b_ub=self.b_ub, bounds=(-bound, bound), method=method, options=linprog_options)
+            UB_result = linprog(current_values, A_ub=-current_A, b_ub=-self.b_ub, bounds=(-bound, bound), method=method, options=linprog_options)
+            degree_bounds = []
+            for bound_name, result in (('LB', LB_result), ('UB', UB_result)):
+                if result.success:
+                    print(f"Poly degree {deg} {bound_name} optimal parameters found:")
+                    print("c_i =", result.x)
+                    bound_val = np.dot(current_values, result.x)
+                    degree_bounds.append(bound_val)
+                    print(f"Overlap {bound_name}: ", bound_val)
+                else:
+                    print(f"Poly degree {deg} {bound_name} optimization failed: {result.message}")
+                    degree_bounds.append(np.nan)
+            cheb_coeffs = self.compute_chebyshev_coeffs(n=deg) if deg >= 0 else np.array([0.0])
+            cheb_value = np.dot(current_values, cheb_coeffs[:deg + 1]) if deg >= 0 else 0.0
+            summaries.append({
+                "degree": deg,
+                "LB_result": LB_result,
+                "UB_result": UB_result,
+                "bounds": degree_bounds,
+                "chebyshev_coeffs": cheb_coeffs,
+                "chebyshev_value": cheb_value
+            })
+
+        if len(summaries) == 1:
+            summary = summaries[0]
+            self.poly_degree = summary["degree"]
+            self.LB_result = summary["LB_result"]
+            self.UB_result = summary["UB_result"]
+            self.bounds = summary["bounds"]
+            self.chebyshev_coeffs = summary["chebyshev_coeffs"]
+            self.chebyshev_approximation = summary["chebyshev_value"]
+            self.multi_degree_results = None
+            print("Chebyshev Approximation Value: ", self.chebyshev_approximation)
+            return self.LB_result, self.UB_result, self.bounds
+
+        self.multi_degree_results = summaries
+        self.poly_degree = summaries[-1]["degree"]
+        self.LB_result = summaries[-1]["LB_result"]
+        self.UB_result = summaries[-1]["UB_result"]
+        self.bounds = summaries[-1]["bounds"]
+        self.chebyshev_coeffs = summaries[-1]["chebyshev_coeffs"]
+        self.chebyshev_approximation = summaries[-1]["chebyshev_value"]
+        print("Chebyshev Approximation Value (last degree): ", self.chebyshev_approximation)
+        return summaries
     
     def plot_results(self, constraint_pts, n_plot_points=1000, used_cheb=True, legend_anchor=(1,0.2), show_constraint_points=False, limit_adjust=(0,0), linewidth=1, show_spectrum=False, show_lowest_highest=False, constraint_recipe_obj=None, plot_title=None, plot_chebyshev=False, truncate_lower=None):
         """
@@ -626,6 +665,8 @@ def gram_to_coefs(Q, deg):
                 expr += Q[i,j]
         coefs.append(expr)
     return coefs
+
+# def gen_SIP_intervals(bound_pairs):
 class PolyBounds_SIP:
     """
     Semi-Infinite Programming approaches for polynomial bounds:
@@ -638,10 +679,11 @@ class PolyBounds_SIP:
         self.poly_degree = poly_degree if poly_degree is not None else len(values)-1
         self.bounds = []
         self.method_used = None
+        self.multi_degree_results = None
         if P_exact is not None:
             print("Exact overlap:", P_exact)
 
-    def optimize_sos(self, intervals, lower_coefs_list, solver="SCS", verbose=False, global_bnd=None, solver_max_iters=None):
+    def optimize_sos(self, intervals, lower_coefs_list, solver="SCS", verbose=False, global_bnd=None, solver_max_iters=None, poly_degrees=None):
         """
         SOS/SDP (power basis) for piecewise polynomial constraints on intervals.
         Two SDPs:
@@ -654,127 +696,140 @@ class PolyBounds_SIP:
         solver_max_iters: optional int, forwarded to cp.Problem.solve(...) as max_iters when provided
         """
         import cvxpy as cp
-        n = self.poly_degree
-        M = self.values  # objective weights (must be power moments)
+        if len(lower_coefs_list) != len(intervals):
+            raise ValueError("lower_coefs_list must have the same length as intervals.")
+        if poly_degrees is None:
+            poly_degrees = [self.poly_degree]
+        poly_degrees = sorted({int(deg) for deg in poly_degrees})
+        if not poly_degrees:
+            raise ValueError("poly_degrees must contain at least one degree.")
 
-        # build constraints for sign*(p-l) = SOS certificate
-        def interval_constraints(cvar, intervals_, Llist_, sign):
-            cons = []
-            for (a, b), lcoefs in zip(intervals_, Llist_):
-                # degree of residual r(x)
-                deg_r = max(n, len(lcoefs) - 1)
-                deg_r = int(max(0, deg_r))
+        max_available = len(self.values) - 1
+        for deg in poly_degrees:
+            if deg < 0 or deg > max_available:
+                raise ValueError(f"Requested poly_degree {deg} is outside [0, {max_available}].")
 
-                if deg_r % 2 == 0:
-                    # -------- EVEN DEGREE CASE --------
-                    d0 = deg_r // 2
-                    d1 = max(0, (deg_r - 2) // 2)
-
-                    Q0 = cp.Variable((d0 + 1, d0 + 1), PSD=True)
-                    Q1 = cp.Variable((d1 + 1, d1 + 1), PSD=True)
-
-                    s0 = gram_to_coefs(Q0, d0)
-                    s1 = gram_to_coefs(Q1, d1)
-
-                    # (x-a)(b-x) = -x^2 + (a+b)x - ab, note the reverse order in quad for convolution to work
-                    quad = [-a * b, (a + b), -1.0]
-                    conv = [0] * (len(s1) + len(quad) - 1)
-                    for i in range(len(s1)):
-                        for j in range(len(quad)):
-                            conv[i + j] += s1[i] * quad[j]
-
-                    cp_poly = [cvar[i] if i <= n else 0 for i in range(deg_r + 1)]
-                    lp = list(lcoefs[:deg_r + 1]) + [0] * max(0, deg_r + 1 - len(lcoefs))
-                    rcoefs = [sign * (cp_poly[k] - lp[k]) for k in range(deg_r + 1)]
-
-                    L = max(len(rcoefs), len(s0), len(conv))
-                    def pad(lst): return list(lst) + [0] * (L - len(lst))
-                    s0p, convp, rpad = pad(s0), pad(conv), pad(rcoefs)
-
-                    for k in range(deg_r + 1):
-                        cons.append(rpad[k] == s0p[k] + convp[k])
-
-                    cons += [Q0 >> 0, Q1 >> 0]
-
-                else:
-                    # -------- ODD DEGREE CASE --------
-                    d_sa = (deg_r - 1) // 2
-                    d_sb = (deg_r - 1) // 2
-
-                    Qa = cp.Variable((d_sa + 1, d_sa + 1), PSD=True)
-                    Qb = cp.Variable((d_sb + 1, d_sb + 1), PSD=True)
-
-                    sa = gram_to_coefs(Qa, d_sa)
-                    sb = gram_to_coefs(Qb, d_sb)
-
-                    # (x-a) sa(x)
-                    term_a = [0] * (len(sa) + 1)
-                    for i in range(len(sa)):
-                        term_a[i] += -a * sa[i]
-                        term_a[i + 1] += sa[i]
-
-                    # (b-x) sb(x) = b*sb(x) - x*sb(x)
-                    term_b = [0] * (len(sb) + 1)
-                    for i in range(len(sb)):
-                        term_b[i] += b * sb[i]
-                        term_b[i + 1] -= sb[i]
-
-                    cp_poly = [cvar[i] if i <= n else 0 for i in range(deg_r + 1)]
-                    lp = list(lcoefs[:deg_r + 1]) + [0] * max(0, deg_r + 1 - len(lcoefs))
-                    rcoefs = [sign * (cp_poly[k] - lp[k]) for k in range(deg_r + 1)]
-
-                    L = max(len(rcoefs), len(term_a), len(term_b))
-                    def pad(lst): return list(lst) + [0] * (L - len(lst))
-                    term_ap, term_bp, rpad = pad(term_a), pad(term_b), pad(rcoefs)
-
-                    for k in range(deg_r + 1):
-                        cons.append(rpad[k] == term_ap[k] + term_bp[k])
-
-                    cons += [Qa >> 0, Qb >> 0]
-
-            return cons
-
-        # Prepare optional kwargs for Problem.solve based on caller input
         solve_kwargs = {}
         if solver_max_iters is not None:
             solve_kwargs['max_iters'] = int(solver_max_iters)
 
-        # Global bounds on c_LB and c_UB
+        def solve_for_degree(degree):
+            n = degree
+            M = self.values[:degree + 1]
 
-        # --- MINORIZER ---
-        c_LB = cp.Variable(n+1)
-        cons_LB = interval_constraints(c_LB, intervals, lower_coefs_list, sign=-1)
-        if global_bnd is not None:
-            cons_LB.append(c_LB <= global_bnd)
-            cons_LB.append(-global_bnd <= c_LB)
-        prob_LB = cp.Problem(cp.Maximize(M @ c_LB), cons_LB)
-        prob_LB.solve(solver=solver, verbose=verbose, **solve_kwargs)
-        LB_val = float(M @ c_LB.value) if c_LB.value is not None else None
+            def interval_constraints(cvar, sign):
+                cons = []
+                for (a, b), lcoefs in zip(intervals, lower_coefs_list):
+                    deg_r = max(n, len(lcoefs) - 1)
+                    deg_r = int(max(0, deg_r))
+                    if deg_r % 2 == 0:
+                        d0 = deg_r // 2
+                        d1 = max(0, (deg_r - 2) // 2)
+                        Q0 = cp.Variable((d0 + 1, d0 + 1), PSD=True)
+                        Q1 = cp.Variable((d1 + 1, d1 + 1), PSD=True)
+                        s0 = gram_to_coefs(Q0, d0)
+                        s1 = gram_to_coefs(Q1, d1)
+                        quad = [-a * b, (a + b), -1.0]
+                        conv = [0] * (len(s1) + len(quad) - 1)
+                        for i in range(len(s1)):
+                            for j in range(len(quad)):
+                                conv[i + j] += s1[i] * quad[j]
+                        cp_poly = [cvar[i] if i <= n else 0 for i in range(deg_r + 1)]
+                        lp = list(lcoefs[:deg_r + 1]) + [0] * max(0, deg_r + 1 - len(lcoefs))
+                        rcoefs = [sign * (cp_poly[k] - lp[k]) for k in range(deg_r + 1)]
+                        L = max(len(rcoefs), len(s0), len(conv))
+                        def pad(lst):
+                            return list(lst) + [0] * (L - len(lst))
+                        s0p, convp, rpad = pad(s0), pad(conv), pad(rcoefs)
+                        for k in range(deg_r + 1):
+                            cons.append(rpad[k] == s0p[k] + convp[k])
+                        cons += [Q0 >> 0, Q1 >> 0]
+                    else:
+                        d_sa = (deg_r - 1) // 2
+                        d_sb = (deg_r - 1) // 2
+                        Qa = cp.Variable((d_sa + 1, d_sa + 1), PSD=True)
+                        Qb = cp.Variable((d_sb + 1, d_sb + 1), PSD=True)
+                        sa = gram_to_coefs(Qa, d_sa)
+                        sb = gram_to_coefs(Qb, d_sb)
+                        term_a = [0] * (len(sa) + 1)
+                        for i in range(len(sa)):
+                            term_a[i] += -a * sa[i]
+                            term_a[i + 1] += sa[i]
+                        term_b = [0] * (len(sb) + 1)
+                        for i in range(len(sb)):
+                            term_b[i] += b * sb[i]
+                            term_b[i + 1] -= sb[i]
+                        cp_poly = [cvar[i] if i <= n else 0 for i in range(deg_r + 1)]
+                        lp = list(lcoefs[:deg_r + 1]) + [0] * max(0, deg_r + 1 - len(lcoefs))
+                        rcoefs = [sign * (cp_poly[k] - lp[k]) for k in range(deg_r + 1)]
+                        L = max(len(rcoefs), len(term_a), len(term_b))
+                        def pad(lst):
+                            return list(lst) + [0] * (L - len(lst))
+                        term_ap, term_bp, rpad = pad(term_a), pad(term_b), pad(rcoefs)
+                        for k in range(deg_r + 1):
+                            cons.append(rpad[k] == term_ap[k] + term_bp[k])
+                        cons += [Qa >> 0, Qb >> 0]
+                return cons
 
-        # --- MAJORIZER ---
-        c_UB = cp.Variable(n+1)
-        cons_UB = interval_constraints(c_UB, intervals, lower_coefs_list, sign=+1)
-        if global_bnd is not None:
-            cons_UB.append(c_UB <= global_bnd)
-            cons_UB.append(c_UB >= -global_bnd)
-        prob_UB = cp.Problem(cp.Minimize(M @ c_UB), cons_UB)
-        prob_UB.solve(solver=solver, verbose=verbose, **solve_kwargs)
-        UB_val = float(M @ c_UB.value) if c_UB.value is not None else None
+            c_LB = cp.Variable(n + 1)
+            cons_LB = interval_constraints(c_LB, sign=-1)
+            if global_bnd is not None:
+                cons_LB.append(c_LB <= global_bnd)
+                cons_LB.append(-global_bnd <= c_LB)
+            prob_LB = cp.Problem(cp.Maximize(M @ c_LB), cons_LB)
+            prob_LB.solve(solver=solver, verbose=verbose, **solve_kwargs)
+            LB_val = float(M @ c_LB.value) if c_LB.value is not None else None
 
-        # Store results
-        self.c_LB, self.c_UB = c_LB.value, c_UB.value
-        self.bounds = [LB_val, UB_val]
+            c_UB = cp.Variable(n + 1)
+            cons_UB = interval_constraints(c_UB, sign=+1)
+            if global_bnd is not None:
+                cons_UB.append(c_UB <= global_bnd)
+                cons_UB.append(c_UB >= -global_bnd)
+            prob_UB = cp.Problem(cp.Minimize(M @ c_UB), cons_UB)
+            prob_UB.solve(solver=solver, verbose=verbose, **solve_kwargs)
+            UB_val = float(M @ c_UB.value) if c_UB.value is not None else None
+
+            lb_dummy = type("obj", (), {"x": c_LB.value})
+            ub_dummy = type("obj", (), {"x": c_UB.value})
+            bounds = [LB_val, UB_val]
+            print(f"SOS bounds (degree {degree}):", bounds)
+            return {
+                "degree": degree,
+                "bounds": bounds,
+                "LB_problem": prob_LB,
+                "UB_problem": prob_UB,
+                "c_LB": c_LB.value,
+                "c_UB": c_UB.value,
+                "LB_result": lb_dummy,
+                "UB_result": ub_dummy
+            }
+
+        summaries = [solve_for_degree(deg) for deg in poly_degrees]
         self.method_used = "sos"
-        self.LB_result = type("obj", (), {"x": self.c_LB})
-        self.UB_result = type("obj", (), {"x": self.c_UB})
+        if len(summaries) == 1:
+            summary = summaries[0]
+            self.poly_degree = summary["degree"]
+            self.bounds = summary["bounds"]
+            self.c_LB = summary["c_LB"]
+            self.c_UB = summary["c_UB"]
+            self.LB_result = summary["LB_result"]
+            self.UB_result = summary["UB_result"]
+            self.multi_degree_results = None
+            return summary["LB_problem"], summary["UB_problem"], self.bounds
 
-        print("SOS bounds:", self.bounds)
-        return prob_LB, prob_UB, self.bounds
+        self.multi_degree_results = summaries
+        self.poly_degree = summaries[-1]["degree"]
+        self.bounds = summaries[-1]["bounds"]
+        self.c_LB = summaries[-1]["c_LB"]
+        self.c_UB = summaries[-1]["c_UB"]
+        self.LB_result = summaries[-1]["LB_result"]
+        self.UB_result = summaries[-1]["UB_result"]
+        return summaries
 
 
 
     def plot_results(self, intervals, lower_coefs_list=None,
-                     n_plot_points=500, n_constraint_pts=10, linewidth=2, title=None):
+                     n_plot_points=500, linewidth=2, title=None, show_spectrum=False, **kwargs):
         """
         Plot optimized polynomials and constraint functions.
         For exchange: lower_funcs must be provided.
@@ -793,9 +848,14 @@ class PolyBounds_SIP:
             ax.plot(xs, UB_poly(xs), label="Majorizing poly (UB)", lw=linewidth, color="green")
             # Plot on each interval with its own constraint l_j
             for (a,b), lcoefs in zip(intervals, lower_coefs_list or []):
-                xs_piecewise = np.linspace(a, b, n_constraint_pts)
+                xs_piecewise = np.linspace(a, b, 2)
                 f_poly = Polynomial(lcoefs)
                 ax.plot(xs_piecewise, f_poly(xs_piecewise), "--", lw=linewidth, color="red")
+            if show_spectrum:
+                ax2 = ax.twinx()
+                # Placeholder for spectrum plotting; user should provide actual spectrum data
+                ax2.stem(kwargs.get("exact_energies"), kwargs.get("exact_overlaps"), linefmt='grey', markerfmt=' ', basefmt='C0', label='Exact spectrum')
+                ax2.set_ylabel('Overlap')
 
         if title:
             ax.set_title(title + f" (deg={self.poly_degree})")
@@ -844,6 +904,251 @@ def random_distr(num_evals, major_ovlp=0.6, max_ovlp_index=1, energy_bounds=(-1,
     overlaps = np.insert(small_probs, max_ovlp_index, major_ovlp)
     return (evals, overlaps)
 
+class OverlapEstimator:
+    """
+    Estimate overlaps via polynomial bounds or SIP configurations.
+    """
+
+    def __init__(self, moments=None, exact_overlaps=None, exact_energies=None):
+        self.moments = moments
+        self.exact_overlaps = exact_overlaps
+        self.exact_energies = exact_energies
+        self.last_results = None
+
+    def _normalize_modes(self, recipe: dict):
+        modes = recipe.get("mode")
+        if modes is None:
+            raise ValueError("recipe must include a 'mode' entry.")
+        if isinstance(modes, str):
+            modes = [modes]
+        elif isinstance(modes, (list, tuple)):
+            modes = list(modes)
+        else:
+            raise ValueError("mode must be a string or list/tuple of strings.")
+        normalized = []
+        for mode in modes:
+            if mode is None:
+                continue
+            normalized.append(str(mode).lower())
+        if not normalized:
+            raise ValueError("mode list cannot be empty.")
+        unsupported = set(normalized) - {"exact", "approx", "manual"}
+        if unsupported:
+            raise ValueError(f"Unsupported mode(s): {unsupported}.")
+        return normalized
+
+    def _build_mode_recipe(self, recipe: dict, mode: str):
+        mode_overrides = recipe.get(mode, {})
+        if mode_overrides and not isinstance(mode_overrides, dict):
+            raise ValueError(f"Overrides for mode '{mode}' must be provided as a dict.")
+        # Copy base recipe excluding explicit per-mode override blocks
+        base = {k: v for k, v in recipe.items() if k not in {"mode", "exact", "approx", "manual"}}
+        merged = {**base, **(mode_overrides or {})}
+        merged["mode"] = mode
+        return merged
+
+    def _validate_single_mode(self, recipe: dict):
+        mode = recipe["mode"].lower()
+        if mode in {"exact", "approx"}:
+            if "eig_results" not in recipe:
+                raise ValueError(f"eig_results are required for '{mode}' mode.")
+            if "target_indices" not in recipe or "b_values" not in recipe:
+                raise ValueError(f"target_indices and b_values must be provided for '{mode}' mode.")
+            if len(recipe["target_indices"]) != len(recipe["b_values"]):
+                raise ValueError("target_indices and b_values must have the same length.")
+        if mode == "manual":
+            if recipe.get("intervals") is None:
+                raise ValueError("intervals must be specified for manual mode.")
+            if recipe.get("moments") is None and self.moments is None:
+                raise ValueError("moments must be provided either at initialization or in the recipe for manual mode.")
+        if recipe.get("poly_degrees") is None and recipe.get("poly_degree") is None:
+            raise ValueError("Specify poly_degrees or poly_degree in the recipe.")
+
+    def compute_bounds(self, recipe: dict):
+        modes = self._normalize_modes(recipe)
+        all_payloads = []
+        for mode in modes:
+            mode_recipe = self._build_mode_recipe(recipe, mode)
+            self._validate_single_mode(mode_recipe)
+            poly_degrees = self._normalize_poly_degrees(mode_recipe)
+            if mode == "exact":
+                payload = self._compute_exact_mode(mode_recipe, poly_degrees)
+            elif mode == "approx":
+                payload = self._compute_approx_mode(mode_recipe, poly_degrees)
+            else:
+                payload = self._compute_manual_mode(mode_recipe, poly_degrees)
+            all_payloads.append(payload)
+        self.last_results = all_payloads[-1] if all_payloads else None
+        return all_payloads if len(all_payloads) > 1 else all_payloads[0]
+
+    def _normalize_poly_degrees(self, recipe: dict):
+        degrees = recipe.get("poly_degrees")
+        if degrees is None:
+            degrees = [recipe.get("poly_degree")]
+        if degrees is None:
+            raise ValueError("poly_degrees could not be determined from the recipe.")
+        if isinstance(degrees, int):
+            degrees = [degrees]
+        normalized = sorted({int(deg) for deg in degrees})
+        if any(deg < 0 for deg in normalized):
+            raise ValueError("poly_degrees must be non-negative.")
+        return normalized
+
+    def _format_solver_output(self, solver_output, degrees):
+        if isinstance(solver_output, list):
+            formatted = []
+            for entry in solver_output:
+                bounds = entry.get("bounds", [np.nan, np.nan])
+                formatted.append({
+                    "degree": entry.get("degree"),
+                    "lower": bounds[0],
+                    "upper": bounds[1]
+                })
+            return formatted
+        if isinstance(solver_output, tuple) and len(solver_output) == 3:
+            bounds = solver_output[2]
+            return [{"degree": degrees[-1], "lower": bounds[0], "upper": bounds[1]}]
+        raise ValueError("Unexpected solver output format.")
+
+    def _load_eig_results(self, recipe: dict):
+        eig_results = recipe.get("eig_results")
+        if isinstance(eig_results, str):
+            with open(eig_results, "r", encoding="utf-8") as handle:
+                eig_results = json.load(handle)
+        return eig_results
+
+    def _compute_exact_mode(self, recipe: dict, poly_degrees):
+        eig_results = self._load_eig_results(recipe)
+        target_indices = recipe["target_indices"]
+        b_values = recipe["b_values"]
+        constraint_recipe = PB_linprog_params_from_eig(
+            eig_results,
+            target_indices=target_indices,
+            use_exact_energies=True,
+            use_all_evals=recipe.get("use_all_evals", False),
+            custom_constraints=recipe.get("custom_constraints"),
+            use_cheb=recipe.get("use_cheb", True),
+            rescale=recipe.get("rescale", True),
+            Energy_constraint_limits=recipe.get("energy_constraint_limits", (float('-inf'), float('inf')))
+        )
+        max_degree = poly_degrees[-1]
+        if max_degree > constraint_recipe.max_poly_degree:
+            raise ValueError("Requested polynomial degree exceeds available moments.")
+        values = constraint_recipe.get_moment_values(max_degree)
+        A_full = constraint_recipe.get_A_ub(max_degree)
+        b_ub = constraint_recipe.get_b_ub(b_values)
+        exact_overlap = constraint_recipe.get_exact_ovlp(b_values)
+        linprog_options = recipe.get("linprog_options", {})
+        poly = PolyBounds_new(values, A_full, b_ub, constraint_recipe.get_constraint_pts(), P_exact=exact_overlap)
+        solver_output = poly.optimize(
+            poly_degrees=poly_degrees,
+            bound=recipe.get("linprog_bound", 1e20),
+            method=recipe.get("linprog_method", "highs"),
+            linprog_options=linprog_options
+        )
+        summary = self._format_solver_output(solver_output, poly_degrees)
+        return {
+            "mode": "exact",
+            "degree_results": summary,
+            "exact_overlap": exact_overlap,
+            "raw_solver_output": solver_output
+        }
+
+    def _compute_approx_mode(self, recipe: dict, poly_degrees):
+        eig_results = self._load_eig_results(recipe)
+        target_indices = recipe["target_indices"]
+        b_values = recipe["b_values"]
+        bound_extension = recipe.get("bound_extension")
+        if bound_extension is None:
+            raise ValueError("bound_extension must be provided for approx mode.")
+        dense_info = tuple(recipe.get("dense_info", (None, None)))
+        num_x_points = recipe.get("num_x_points")
+        if num_x_points is None:
+            raise ValueError("num_x_points must be provided for approx mode.")
+        constraint_recipe = PB_linprog_params_from_eig(
+            eig_results,
+            target_indices=target_indices,
+            use_exact_energies=False,
+            use_all_evals=recipe.get("use_all_evals", False),
+            custom_constraints=recipe.get("custom_constraints"),
+            use_cheb=recipe.get("use_cheb", False),
+            rescale=recipe.get("rescale", True),
+            bound_extension=bound_extension,
+            dense_info=dense_info,
+            num_x_points=num_x_points,
+            Energy_constraint_limits=recipe.get("energy_constraint_limits", (float('-inf'), float('inf')))
+        )
+        max_degree = poly_degrees[-1]
+        if max_degree > constraint_recipe.max_poly_degree:
+            raise ValueError("Requested polynomial degree exceeds available moments.")
+        raw_intervals = constraint_recipe.bound_pairs
+        if constraint_recipe.rescale:
+            intervals = [tuple(constraint_recipe._rescale(np.array(pair))) for pair in raw_intervals]
+        else:
+            intervals = [tuple(pair) for pair in raw_intervals]
+        region_b = np.zeros(len(intervals))
+        for idx, b_val in zip(np.atleast_1d(constraint_recipe.nonzero_b_indices), b_values):
+            region_b[int(idx)] = b_val
+        lower_coefs_list = [[val] for val in region_b]
+        values = constraint_recipe.get_moment_values(max_degree)
+        sip = PolyBounds_SIP(values, poly_degree=max_degree)
+        solver_output = sip.optimize_sos(
+            intervals,
+            lower_coefs_list,
+            solver=recipe.get("solver", "SCS"),
+            verbose=recipe.get("verbose", False),
+            global_bnd=recipe.get("global_bound"),
+            solver_max_iters=recipe.get("solver_max_iters"),
+            poly_degrees=poly_degrees
+        )
+        summary = self._format_solver_output(solver_output, poly_degrees)
+        return {
+            "mode": "approx",
+            "degree_results": summary,
+            "intervals": intervals,
+            "region_b_values": region_b.tolist(),
+            "raw_solver_output": solver_output
+        }
+
+    def _compute_manual_mode(self, recipe: dict, poly_degrees):
+        manual_moments = recipe.get("moments", self.moments)
+        if manual_moments is None:
+            raise ValueError("moments must be supplied for manual mode.")
+        manual_moments = np.array(manual_moments)
+        max_available = len(manual_moments) - 1
+        max_degree = poly_degrees[-1]
+        if max_degree > max_available:
+            raise ValueError("Requested polynomial degree exceeds available manual moments.")
+        intervals_cfg = recipe.get("intervals", [])
+        intervals = []
+        lower_coefs_list = []
+        for entry in intervals_cfg:
+            if len(entry) < 3:
+                raise ValueError("Each interval entry must include at least (low, high, b_value).")
+            low, high = entry[0], entry[1]
+            b_val = entry[2]
+            intervals.append((low, high))
+            if isinstance(b_val, (list, tuple, np.ndarray)):
+                lower_coefs_list.append(list(b_val))
+            else:
+                lower_coefs_list.append([b_val])
+        sip = PolyBounds_SIP(manual_moments[:max_degree + 1], poly_degree=max_degree)
+        solver_output = sip.optimize_sos(
+            intervals,
+            lower_coefs_list,
+            solver=recipe.get("solver", "SCS"),
+            verbose=recipe.get("verbose", False),
+            global_bnd=recipe.get("global_bound"),
+            solver_max_iters=recipe.get("solver_max_iters"),
+            poly_degrees=poly_degrees
+        )
+        summary = self._format_solver_output(solver_output, poly_degrees)
+        return {
+            "mode": "manual",
+            "degree_results": summary,
+            "intervals": intervals,
+            "raw_solver_output": solver_output
+        }
 class MultStateBounds:
     """
     Resolves the bounds for multiple states using an "outer" linear program loop.
